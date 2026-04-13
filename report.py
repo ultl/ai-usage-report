@@ -8,9 +8,9 @@ time-trend, and pivot views. Optionally uses a local Ollama model to infer
 lessons from each task and compare against the user's own "Bài học rút ra".
 
 Usage:
-    python report.py file1.xlsx file2.xlsx ... -o report.xlsx
-    python report.py *.xlsx -o report.xlsx --no-ai
-    python report.py *.xlsx -o report.xlsx --model qwen3-vl:8b-instruct-q4_K_M
+    python ai_journal_report.py file1.xlsx file2.xlsx ... -o report.xlsx
+    python ai_journal_report.py *.xlsx -o report.xlsx --no-ai
+    python ai_journal_report.py *.xlsx -o report.xlsx --model qwen2.5:7b
 """
 
 from __future__ import annotations
@@ -95,6 +95,7 @@ class Session:
     comparison: str = ""
     ai_rating: float | None = None
     ai_rating_reason: str = ""
+    suggested_prompt: str = ""
 
     def row_hash(self) -> str:
         """Stable hash for caching AI inference across runs."""
@@ -183,22 +184,75 @@ def parse_file(path: Path) -> list[Session]:
 # Ollama inference (batch)
 # --------------------------------------------------------------------------- #
 
-PROMPT_TEMPLATE = """Bạn là chuyên gia review quá trình sử dụng AI của lập trình viên.
-Dựa vào thông tin một phiên làm việc với AI dưới đây, hãy:
-1. Rút ra BÀI HỌC quan trọng nhất (tối đa 2 câu, tiếng Việt, tập trung vào prompt engineering hoặc quy trình).
-2. SO SÁNH bài học của bạn với bài học người dùng tự ghi. Chọn đúng MỘT nhãn: "Đồng thuận", "Bổ sung", "Khác biệt", hoặc "Người dùng để trống".
-3. CHẤM ĐIỂM từ 1 đến 5 mức độ "Kết quả" đã đáp ứng "Mô tả nhiệm vụ" (1=không đạt, 2=kém, 3=trung bình, 4=tốt, 5=xuất sắc). Kèm 1 câu lý do ngắn gọn bằng tiếng Việt.
+PROMPT_TEMPLATE = """<role>
+Bạn là chuyên gia prompt engineering, thành thạo "Claude Prompting Best Practices" của Anthropic.
+Nhiệm vụ của bạn: phân tích một phiên làm việc AI thực tế, chấm điểm, và viết lại prompt theo đúng best practices.
+</role>
 
-Tên phiên: {title}
-Công cụ: {tool}
-Danh mục: {category}
-Mô tả nhiệm vụ: {task_desc}
-Prompt chính: {prompt}
-Kết quả: {result}
-Bài học người dùng tự ghi: {user_lesson}
+<best_practices_rubric>
+Dùng CHÍNH XÁC các nguyên tắc sau (Anthropic Claude Prompting Best Practices) làm thước đo:
 
-Trả về DUY NHẤT một đối tượng JSON hợp lệ, không có markdown, không có giải thích thêm, theo đúng schema:
-{{"ai_lesson": "...", "comparison": "...", "ai_rating": 4, "ai_rating_reason": "..."}}"""
+1. **Clear & Direct** — Prompt có nêu cụ thể định dạng đầu ra, ràng buộc, và các bước tuần tự không? "Golden rule": nếu một đồng nghiệp mới không hiểu prompt thì AI cũng không hiểu.
+2. **Context & Motivation** — Prompt có giải thích *tại sao* (mục tiêu, đối tượng dùng, bối cảnh nghiệp vụ) để AI tổng quát hoá tốt hơn không?
+3. **Examples (few-shot)** — Với task phức tạp/lặp lại, có kèm 2–5 ví dụ đa dạng, bọc trong <example> tags không?
+4. **XML Structure** — Các phần khác nhau (instructions, context, input, examples) có được tách bằng XML tags nhất quán để tránh nhập nhằng không?
+5. **Role Assignment** — Có gán vai trò/persona cụ thể cho AI để định hướng tone & chuyên môn không?
+6. **Long-context Ordering** — Với input dài (20k+ tokens, tài liệu, data), dữ liệu dài có được đặt TRÊN câu hỏi/instructions không?
+7. **Positive Instructions** — Nói AI *phải làm gì* thay vì *không được làm gì*?
+8. **Ground in Quotes** — Với task phân tích tài liệu dài, có yêu cầu AI trích dẫn phần liên quan trước khi xử lý không?
+9. **Self-check** — Có yêu cầu AI tự kiểm tra lại kết quả trước khi kết thúc không?
+10. **Output Format Specification** — Schema đầu ra có được định nghĩa rõ (JSON schema, XML tags, markdown structure)?
+</best_practices_rubric>
+
+<session_to_analyze>
+<title>{title}</title>
+<tool>{tool}</tool>
+<category>{category}</category>
+<task_description>{task_desc}</task_description>
+<user_prompt>{prompt}</user_prompt>
+<ai_result>{result}</ai_result>
+<user_self_lesson>{user_lesson}</user_self_lesson>
+</session_to_analyze>
+
+<instructions>
+Thực hiện các bước sau theo thứ tự:
+
+1. **Đọc <user_prompt>** và kiểm tra nó đáp ứng được nguyên tắc nào trong <best_practices_rubric>, vi phạm nguyên tắc nào. Xác định 1–2 nguyên tắc BỊ VI PHẠM NẶNG NHẤT.
+
+2. **Viết `ai_lesson`** (tiếng Việt, 2–3 câu, CỰC KỲ CỤ THỂ):
+   - Chỉ đích danh nguyên tắc bị vi phạm (tên + số thứ tự từ rubric).
+   - Trích dẫn hoặc mô tả chính xác phần nào trong <user_prompt> thiếu/yếu (ví dụ: "prompt không có phần định dạng đầu ra", "prompt thiếu context về stack công nghệ", "không có ví dụ mẫu cho format").
+   - Giải thích ngắn gọn hậu quả quan sát được trong <ai_result>.
+   - KHÔNG viết chung chung như "nên cung cấp context đầy đủ" — phải chỉ rõ context NÀO bị thiếu.
+
+3. **So sánh với <user_self_lesson>** → chọn MỘT nhãn cho `comparison`:
+   - "Đồng thuận" — bài học của bạn và user trùng về nguyên tắc chính.
+   - "Bổ sung" — bạn chỉ ra thêm nguyên tắc user chưa nhận ra.
+   - "Khác biệt" — bạn và user chỉ ra nguyên tắc khác nhau.
+   - "Người dùng để trống" — <user_self_lesson> rỗng hoặc "(trống)".
+
+4. **Chấm `ai_rating` 1–5** mức độ <ai_result> đáp ứng <task_description>:
+   - 1=không đạt, 2=kém, 3=trung bình, 4=tốt, 5=xuất sắc.
+   - Viết `ai_rating_reason` (1 câu tiếng Việt) chỉ ra điểm cụ thể khớp/lệch giữa kết quả và nhiệm vụ.
+
+5. **Viết `suggested_prompt`** — phiên bản cải tiến của <user_prompt>, ÁP DỤNG tất cả best practices liên quan. BẮT BUỘC:
+   - Bắt đầu bằng <role>...</role> gán vai trò cụ thể cho AI.
+   - Có <context>...</context> nêu bối cảnh, stack công nghệ, đối tượng, mục tiêu nghiệp vụ.
+   - Có <task>...</task> liệt kê yêu cầu bằng các bước đánh số nếu thứ tự quan trọng.
+   - Có <constraints>...</constraints> với ràng buộc rõ ràng (nói "phải làm X", tránh "không được Y").
+   - Có <output_format>...</output_format> mô tả schema/định dạng mong muốn.
+   - Nếu task cần ví dụ: kèm <examples><example>...</example></examples>.
+   - Kết thúc bằng 1 câu yêu cầu AI self-check trước khi trả lời.
+   - Prompt BẰNG TIẾNG VIỆT, sẵn sàng copy-paste dùng lại, dài 200–500 từ.
+   - KHÔNG viết placeholder như "[điền vào đây]" — phải điền dữ liệu thật từ <task_description> của session.
+</instructions>
+
+<output_format>
+Trả về DUY NHẤT một đối tượng JSON hợp lệ, không markdown, không giải thích thêm:
+{{"ai_lesson": "...", "comparison": "...", "ai_rating": 4, "ai_rating_reason": "...", "suggested_prompt": "..."}}
+</output_format>
+
+Trước khi trả lời, hãy tự kiểm tra: (a) ai_lesson có chỉ đích danh nguyên tắc cụ thể không? (b) suggested_prompt có đủ 5 XML tag bắt buộc không? (c) JSON có hợp lệ không?"""
 
 
 def _load_cache() -> dict[str, dict[str, str]]:
@@ -217,11 +271,11 @@ def _save_cache(cache: dict[str, dict[str, str]]) -> None:
         print(f"  ⚠  Failed to write cache: {e}", file=sys.stderr)
 
 
-def _truncate(s: str, n: int = 1500) -> str:
+def _truncate(s: str, n: int = 1200) -> str:
     return s if len(s) <= n else s[:n] + "…"
 
 
-def _call_ollama(model: str, prompt: str, timeout: int = 180) -> str:
+def _call_ollama(model: str, prompt: str, timeout: int = 300) -> str:
     r = requests.post(
         OLLAMA_URL,
         json={
@@ -229,7 +283,11 @@ def _call_ollama(model: str, prompt: str, timeout: int = 180) -> str:
             "prompt": prompt,
             "stream": False,
             "format": "json",
-            "options": {"temperature": 0.2},
+            "options": {
+                "temperature": 0.2,
+                "num_ctx": 8192,
+                "num_predict": 2048,
+            },
         },
         timeout=timeout,
     )
@@ -237,12 +295,12 @@ def _call_ollama(model: str, prompt: str, timeout: int = 180) -> str:
     return r.json().get("response", "")
 
 
-def _parse_json_response(raw: str) -> tuple[str, str, float | None, str]:
+def _parse_json_response(raw: str) -> tuple[str, str, float | None, str, str]:
     if not raw:
-        return "", "", None, ""
+        return "", "", None, "", ""
     raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE)
 
-    def _extract(obj: dict) -> tuple[str, str, float | None, str]:
+    def _extract(obj: dict) -> tuple[str, str, float | None, str, str]:
         ai_lesson = str(obj.get("ai_lesson", "")).strip()
         comparison = str(obj.get("comparison", "")).strip()
         rating_raw = obj.get("ai_rating")
@@ -253,7 +311,8 @@ def _parse_json_response(raw: str) -> tuple[str, str, float | None, str]:
         except (ValueError, TypeError):
             rating = None
         reason = str(obj.get("ai_rating_reason", "")).strip()
-        return ai_lesson, comparison, rating, reason
+        suggested = str(obj.get("suggested_prompt", "")).strip()
+        return ai_lesson, comparison, rating, reason, suggested
 
     try:
         return _extract(json.loads(raw))
@@ -264,7 +323,7 @@ def _parse_json_response(raw: str) -> tuple[str, str, float | None, str]:
                 return _extract(json.loads(m.group(0)))
             except json.JSONDecodeError:
                 pass
-        return raw.strip(), "", None, ""
+        return raw.strip(), "", None, "", ""
 
 
 def infer_lessons_batch(sessions: list[Session], model: str) -> None:
@@ -283,6 +342,7 @@ def infer_lessons_batch(sessions: list[Session], model: str) -> None:
             s.comparison = c.get("comparison", "")
             s.ai_rating = c.get("ai_rating")
             s.ai_rating_reason = c.get("ai_rating_reason", "")
+            s.suggested_prompt = c.get("suggested_prompt", "")
             hits += 1
             print(f"  [{i}/{total}] {s.staff} — {s.title[:50]} (cached)")
             continue
@@ -297,16 +357,18 @@ def infer_lessons_batch(sessions: list[Session], model: str) -> None:
         )
         try:
             raw = _call_ollama(model, prompt)
-            ai_lesson, comparison, ai_rating, reason = _parse_json_response(raw)
+            ai_lesson, comparison, ai_rating, reason, suggested = _parse_json_response(raw)
             s.ai_lesson = ai_lesson
             s.comparison = comparison or ("Người dùng để trống" if not s.user_lesson else "Khác biệt")
             s.ai_rating = ai_rating
             s.ai_rating_reason = reason
+            s.suggested_prompt = suggested
             cache[h] = {
                 "ai_lesson": s.ai_lesson,
                 "comparison": s.comparison,
                 "ai_rating": s.ai_rating,
                 "ai_rating_reason": s.ai_rating_reason,
+                "suggested_prompt": s.suggested_prompt,
             }
             rating_str = f"{ai_rating:.0f}★" if ai_rating else "—"
             print(f"  [{i}/{total}] {s.staff} — {s.title[:50]}  →  {s.comparison} ({rating_str})")
@@ -625,14 +687,16 @@ def build_ai_comparison_sheet(wb: Workbook, sessions: list[Session]) -> None:
     ws = wb.create_sheet("🤖 AI Lesson Compare")
     headers = [
         "Staff", "Ngày", "Tên Phiên", "Công Cụ",
+        "Mô Tả Nhiệm Vụ", "Prompt Chính", "Kết Quả",
         "Bài Học Người Dùng", "Bài Học AI Suy Luận", "So Sánh",
         "User ★", "AI ★", "Δ (AI − User)", "Lý Do AI Chấm",
+        "Prompt Đề Xuất (AI + User Lessons)",
     ]
     n_cols = len(headers)
     hr = _title_block(
         ws,
-        "🤖  SO SÁNH BÀI HỌC & CHẤM ĐIỂM  —  AI vs Người Dùng",
-        "AI infers lesson and rates how well 'Kết quả' met 'Mô tả nhiệm vụ' (1–5)",
+        "🤖  SO SÁNH BÀI HỌC & ĐỀ XUẤT PROMPT  —  AI vs Người Dùng",
+        "AI infers lesson, rates output (1–5), and suggests an improved prompt applying both lessons",
         n_cols,
     )
     for i, h in enumerate(headers, 1):
@@ -647,6 +711,7 @@ def build_ai_comparison_sheet(wb: Workbook, sessions: list[Session]) -> None:
     }
     gap_green = PatternFill("solid", start_color="C6EFCE")
     gap_red = PatternFill("solid", start_color="FFC7CE")
+    suggested_fill = PatternFill("solid", start_color="FFF2CC")
 
     for i, s in enumerate(sessions):
         r = hr + 1 + i
@@ -654,22 +719,25 @@ def build_ai_comparison_sheet(wb: Workbook, sessions: list[Session]) -> None:
         ws.cell(row=r, column=2, value=_fmt_date(s.date))
         ws.cell(row=r, column=3, value=s.title)
         ws.cell(row=r, column=4, value=s.tool)
-        ws.cell(row=r, column=5, value=s.user_lesson or "(trống)")
-        ws.cell(row=r, column=6, value=s.ai_lesson or "—")
-        comp_cell = ws.cell(row=r, column=7, value=s.comparison or "—")
+        ws.cell(row=r, column=5, value=s.task_desc or "—")
+        ws.cell(row=r, column=6, value=s.prompt or "—")
+        ws.cell(row=r, column=7, value=s.result or "—")
+        ws.cell(row=r, column=8, value=s.user_lesson or "(trống)")
+        ws.cell(row=r, column=9, value=s.ai_lesson or "—")
+        comp_cell = ws.cell(row=r, column=10, value=s.comparison or "—")
         if s.comparison in comparison_fills:
             comp_cell.fill = comparison_fills[s.comparison]
             comp_cell.alignment = CENTER
 
-        user_cell = ws.cell(row=r, column=8, value=s.rating)
-        ai_cell = ws.cell(row=r, column=9, value=s.ai_rating)
+        user_cell = ws.cell(row=r, column=11, value=s.rating)
+        ai_cell = ws.cell(row=r, column=12, value=s.ai_rating)
         user_cell.alignment = CENTER
         ai_cell.alignment = CENTER
 
         gap = None
         if s.rating is not None and s.ai_rating is not None:
             gap = round(s.ai_rating - s.rating, 1)
-        gap_cell = ws.cell(row=r, column=10, value=gap)
+        gap_cell = ws.cell(row=r, column=13, value=gap)
         gap_cell.alignment = CENTER
         if gap is not None:
             if gap >= 1:
@@ -677,14 +745,17 @@ def build_ai_comparison_sheet(wb: Workbook, sessions: list[Session]) -> None:
             elif gap <= -1:
                 gap_cell.fill = gap_red
 
-        ws.cell(row=r, column=11, value=s.ai_rating_reason or "—")
+        ws.cell(row=r, column=14, value=s.ai_rating_reason or "—")
+        sug_cell = ws.cell(row=r, column=15, value=s.suggested_prompt or "—")
+        if s.suggested_prompt:
+            sug_cell.fill = suggested_fill
 
     _style_data_range(ws, hr + 1, hr + len(sessions), n_cols)
-    _set_widths(ws, [14, 12, 28, 14, 38, 38, 16, 9, 9, 14, 38])
-    ws.freeze_panes = ws.cell(row=hr + 1, column=1)
+    _set_widths(ws, [14, 12, 26, 14, 36, 36, 36, 34, 38, 14, 8, 8, 12, 32, 65])
+    ws.freeze_panes = ws.cell(row=hr + 1, column=5)
 
     for r in range(hr + 1, hr + 1 + len(sessions)):
-        ws.row_dimensions[r].height = 60
+        ws.row_dimensions[r].height = 150
 
 
 def build_report(sessions: list[Session], output: Path, with_ai: bool) -> None:
