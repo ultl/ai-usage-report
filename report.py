@@ -509,7 +509,7 @@ def build_summary_sheet(wb: Workbook, sessions: list[Session]) -> None:
         n_cols,
     )
 
-    headers = ["Chỉ Số", "Giá Trị", "", "Top 5 Công Cụ AI", "Phiên", "Giờ Tiết Kiệm", "Hiệu Suất %"]
+    headers = ["Chỉ Số", "Giá Trị", "", "Top 5 Công Cụ AI", "Phiên", "Giờ Tiết Kiệm", "Tỷ Lệ Tiết Kiệm %"]
     for i, h in enumerate(headers, 1):
         ws.cell(row=hr, column=i, value=h)
     _style_header(ws, hr, n_cols)
@@ -520,7 +520,7 @@ def build_summary_sheet(wb: Workbook, sessions: list[Session]) -> None:
         ("Tổng EST (không AI)", f"{a['est']}h"),
         ("Tổng Actual (có AI)", f"{a['actual']}h"),
         ("Tổng giờ tiết kiệm", f"{a['saved']}h"),
-        ("Hiệu suất AI", f"{a['eff']}%"),
+        ("Tỷ lệ thời gian tiết kiệm", f"{a['eff']}%"),
         ("Giờ tiết kiệm TB/phiên", f"{a['avg_saved']}h"),
         ("Chất lượng trung bình", f"{a['avg_rating']} / 5"),
         ("Phiên xuất sắc (5★)", a["excellent"]),
@@ -554,7 +554,7 @@ def build_per_staff_sheet(wb: Workbook, sessions: list[Session]) -> None:
     ws = wb.create_sheet("👤 Per Staff")
     headers = [
         "Staff", "Số Phiên", "EST (h)", "Actual (h)", "Tiết Kiệm (h)",
-        "Hiệu Suất %", "TB Tiết Kiệm/Phiên", "Rating TB", "Phiên 5★", "Công Cụ Chính",
+        "Tỷ Lệ Tiết Kiệm %", "TB Tiết Kiệm/Phiên", "Rating TB", "Phiên 5★", "Công Cụ Chính",
     ]
     n_cols = len(headers)
     hr = _title_block(ws, "👤  THỐNG KÊ THEO STAFF", "Ranking by total hours saved", n_cols)
@@ -596,7 +596,7 @@ def build_per_tool_sheet(wb: Workbook, sessions: list[Session]) -> None:
     ws = wb.create_sheet("🔧 Per Tool")
     headers = [
         "Công Cụ AI", "Số Phiên", "EST (h)", "Actual (h)", "Tiết Kiệm (h)",
-        "Hiệu Suất %", "TB Tiết Kiệm/Phiên", "Rating TB", "Phiên 5★",
+        "Tỷ Lệ Tiết Kiệm %", "TB Tiết Kiệm/Phiên", "Rating TB", "Phiên 5★",
     ]
     n_cols = len(headers)
     hr = _title_block(ws, "🔧  THỐNG KÊ THEO CÔNG CỤ AI", "Ranking by total hours saved", n_cols)
@@ -634,7 +634,7 @@ def build_per_category_sheet(wb: Workbook, sessions: list[Session]) -> None:
     ws = wb.create_sheet("📂 Per Category")
     headers = [
         "Danh Mục", "Số Phiên", "EST (h)", "Actual (h)", "Tiết Kiệm (h)",
-        "Hiệu Suất %", "TB Tiết Kiệm/Phiên", "Rating TB", "Phiên 5★",
+        "Tỷ Lệ Tiết Kiệm %", "TB Tiết Kiệm/Phiên", "Rating TB", "Phiên 5★",
     ]
     n_cols = len(headers)
     hr = _title_block(ws, "📂  THỐNG KÊ THEO DANH MỤC", "Sorted by total hours saved", n_cols)
@@ -670,7 +670,7 @@ def build_per_category_sheet(wb: Workbook, sessions: list[Session]) -> None:
 
 def build_time_trend_sheet(wb: Workbook, sessions: list[Session]) -> None:
     ws = wb.create_sheet("📅 Time Trend")
-    headers = ["Ngày", "Số Phiên", "EST (h)", "Actual (h)", "Tiết Kiệm (h)", "Hiệu Suất %", "Rating TB"]
+    headers = ["Ngày", "Số Phiên", "EST (h)", "Actual (h)", "Tiết Kiệm (h)", "Tỷ Lệ Tiết Kiệm %", "Rating TB"]
     n_cols = len(headers)
     hr = _title_block(ws, "📅  XU HƯỚNG THEO NGÀY", "Daily activity across all staff", n_cols)
     for i, h in enumerate(headers, 1):
@@ -759,7 +759,7 @@ def build_raw_log_sheet(wb: Workbook, sessions: list[Session]) -> None:
     headers = [
         "Staff", "Ngày", "Tên Phiên", "Công Cụ", "Danh Mục",
         "Mô Tả", "Rating", "EST (h)", "Actual (h)", "Tiết Kiệm (h)",
-        "Hiệu Suất %", "Bài Học Người Dùng", "Tags", "Source File",
+        "Tỷ Lệ Tiết Kiệm %", "Bài Học Người Dùng", "Tags", "Source File",
     ]
     n_cols = len(headers)
     hr = _title_block(
@@ -907,7 +907,7 @@ def print_terminal_summary(sessions: list[Session]) -> None:
     print(f"  EST (without AI):  {a['est']:>8}h")
     print(f"  Actual (with AI):  {a['actual']:>8}h")
     print(f"  Time saved:        {a['saved']:>8}h")
-    print(f"  Efficiency:        {a['eff']:>7}%")
+    print(f"  Time Saved %:        {a['eff']:>7}%")
     print(f"  Avg saved/session: {a['avg_saved']:>8}h")
 
     # Per staff

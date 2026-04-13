@@ -1,4 +1,6 @@
 *.xlsx
 .ai_journal_cache.json
+.ai_chart_cache.json
 out/*
 .env
+.omx/
