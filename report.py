@@ -4,24 +4,25 @@ AI Dev Journal - Consolidated Report Generator
 
 Reads multiple AI Dev Journal .xlsx files (one per staff, identified by filename)
 and produces a consolidated Excel report with per-staff, per-category, per-tool,
-time-trend, and pivot views. Optionally uses a local Ollama model to infer
+time-trend, and pivot views. Optionally uses an OpenAI-compatible API to infer
 lessons from each task and compare against the user's own "Bài học rút ra".
 
 Usage:
-    python ai_journal_report.py file1.xlsx file2.xlsx ... -o report.xlsx
-    python ai_journal_report.py *.xlsx -o report.xlsx --no-ai
-    python ai_journal_report.py *.xlsx -o report.xlsx --model qwen2.5:7b
+    python report.py file1.xlsx file2.xlsx ... -o report.xlsx
+    python report.py *.xlsx -o report.xlsx --no-ai
+    python report.py *.xlsx -o report.xlsx --model gpt-5.4-mini
     example of file_name = 'journal_khanh.xlsx'
 """
 
 from __future__ import annotations
-
+from dotenv import load_dotenv
+import os
 import argparse
 import hashlib
 import json
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -31,15 +32,20 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+load_dotenv()
 # --------------------------------------------------------------------------- #
 # Constants
 # --------------------------------------------------------------------------- #
+
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
 
 NHAT_KY_SHEET = "📝 Nhật Ký"
 HEADER_ROW = 3
 DATA_START_ROW = 4
 
-# Columns in Nhật Ký (1-indexed)
+# Columns in Nhật Ký (1-indexed) — matches template.xlsx
 COL_STT = 1
 COL_DATE = 2
 COL_TITLE = 3
@@ -50,11 +56,12 @@ COL_PROMPT = 7
 COL_RESULT = 8
 COL_QUALITY_TEXT = 9
 COL_RATING = 10
-COL_HOURS_SAVED = 11
-COL_USER_LESSON = 12
-COL_TAGS = 13
+COL_EST_HOURS = 11       # EST (without AI)
+COL_ACTUAL_HOURS = 12    # Actual (with AI)
+COL_TIME_SAVED = 13      # Time saved
+COL_USER_LESSON = 14
+COL_TAGS = 15
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
 CACHE_PATH = Path(".ai_journal_cache.json")
 
 # Styling
@@ -63,6 +70,7 @@ HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF", size=11)
 TITLE_FONT = Font(name="Arial", bold=True, size=14, color="1F4E78")
 SUBTITLE_FONT = Font(name="Arial", italic=True, size=10, color="595959")
 CELL_FONT = Font(name="Arial", size=10)
+NUMBER_FONT = Font(name="Arial", size=10, bold=True, color="1F4E78")
 TOTAL_FILL = PatternFill("solid", start_color="D9E1F2")
 TOTAL_FONT = Font(name="Arial", bold=True, size=10)
 THIN = Side(border_style="thin", color="BFBFBF")
@@ -89,7 +97,9 @@ class Session:
     result: str
     quality_text: str
     rating: float | None
-    hours_saved: float | None
+    est_hours: float | None      # EST (without AI)
+    actual_hours: float | None   # Actual (with AI)
+    time_saved: float | None     # Time saved (trusted from user)
     user_lesson: str
     tags: str
     ai_lesson: str = ""
@@ -111,6 +121,13 @@ class Session:
         ])
         return hashlib.sha1(key.encode("utf-8")).hexdigest()
 
+    @property
+    def efficiency(self) -> float | None:
+        """Time saved / EST — what % of work AI eliminated."""
+        if self.est_hours and self.time_saved is not None:
+            return self.time_saved / self.est_hours
+        return None
+
 
 # --------------------------------------------------------------------------- #
 # Parsing
@@ -120,7 +137,6 @@ def staff_from_filename(path: Path) -> str:
     """journal_khanh.xlsx -> khanh; ai-dev-khanh.xlsx -> khanh"""
     stem = path.stem
     parts = re.split(r"[_\-\s]+", stem)
-    # Drop common prefixes
     blacklist = {"journal", "ai", "dev", "nhatky", "nhật", "ký", "log"}
     meaningful = [p for p in parts if p.lower() not in blacklist and p]
     return (meaningful[-1] if meaningful else stem).strip().capitalize()
@@ -158,7 +174,6 @@ def parse_file(path: Path) -> list[Session]:
     for row in range(DATA_START_ROW, ws.max_row + 1):
         title = _cell(ws, row, COL_TITLE)
         tool = _cell(ws, row, COL_TOOL)
-        # Skip rows that are blank or only contain the formula-driven STT
         if title is None and tool is None:
             continue
         sessions.append(Session(
@@ -174,7 +189,9 @@ def parse_file(path: Path) -> list[Session]:
             result=str(_cell(ws, row, COL_RESULT) or ""),
             quality_text=str(_cell(ws, row, COL_QUALITY_TEXT) or ""),
             rating=_to_float(_cell(ws, row, COL_RATING)),
-            hours_saved=_to_float(_cell(ws, row, COL_HOURS_SAVED)),
+            est_hours=_to_float(_cell(ws, row, COL_EST_HOURS)),
+            actual_hours=_to_float(_cell(ws, row, COL_ACTUAL_HOURS)),
+            time_saved=_to_float(_cell(ws, row, COL_TIME_SAVED)),
             user_lesson=str(_cell(ws, row, COL_USER_LESSON) or ""),
             tags=str(_cell(ws, row, COL_TAGS) or ""),
         ))
@@ -182,7 +199,30 @@ def parse_file(path: Path) -> list[Session]:
 
 
 # --------------------------------------------------------------------------- #
-# Ollama inference (batch)
+# Aggregation helpers
+# --------------------------------------------------------------------------- #
+
+def _agg(items: list[Session]) -> dict[str, Any]:
+    """Compute standard metrics for a group of sessions."""
+    n = len(items)
+    est = sum(s.est_hours or 0 for s in items)
+    actual = sum(s.actual_hours or 0 for s in items)
+    saved = sum(s.time_saved or 0 for s in items)
+    eff = (saved / est * 100) if est else 0
+    rated = [s.rating for s in items if s.rating is not None]
+    avg_rating = sum(rated) / len(rated) if rated else 0
+    excellent = sum(1 for s in items if s.rating == 5)
+    avg_saved = saved / n if n else 0
+    return {
+        "n": n, "est": round(est, 1), "actual": round(actual, 1),
+        "saved": round(saved, 1), "eff": round(eff, 1),
+        "avg_rating": round(avg_rating, 2), "excellent": excellent,
+        "avg_saved": round(avg_saved, 1),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# OpenAI-compatible inference (batch)
 # --------------------------------------------------------------------------- #
 
 PROMPT_TEMPLATE = """<role>
@@ -256,7 +296,7 @@ Trả về DUY NHẤT một đối tượng JSON hợp lệ, không markdown, kh
 Trước khi trả lời, hãy tự kiểm tra: (a) ai_lesson có chỉ đích danh nguyên tắc cụ thể không? (b) suggested_prompt có đủ 5 XML tag bắt buộc không? (c) JSON có hợp lệ không?"""
 
 
-def _load_cache() -> dict[str, dict[str, str]]:
+def _load_cache() -> dict[str, dict]:
     if CACHE_PATH.exists():
         try:
             return json.loads(CACHE_PATH.read_text(encoding="utf-8"))
@@ -265,7 +305,7 @@ def _load_cache() -> dict[str, dict[str, str]]:
     return {}
 
 
-def _save_cache(cache: dict[str, dict[str, str]]) -> None:
+def _save_cache(cache: dict[str, dict]) -> None:
     try:
         CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as e:
@@ -276,24 +316,33 @@ def _truncate(s: str, n: int = 1200) -> str:
     return s if len(s) <= n else s[:n] + "…"
 
 
-def _call_ollama(model: str, prompt: str, timeout: int = 300) -> str:
-    r = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
-            "options": {
-                "temperature": 0.2,
-                "num_ctx": 8192,
-                "num_predict": 2048,
-            },
-        },
-        timeout=timeout,
-    )
+def _call_openai(model: str, prompt: str, timeout: int = 300) -> str:
+    base = (OPENAI_BASE_URL or "").rstrip("/")
+    is_azure = "cognitiveservices.azure.com" in base or "openai.azure.com" in base
+
+    if is_azure:
+        # Azure: /openai/deployments/{model}/chat/completions?api-version=...
+        host = re.sub(r"/openai(/v1)?$", "", base).rstrip("/")
+        url = f"{host}/openai/deployments/{model}/chat/completions?api-version=2024-12-01-preview"
+        headers = {"api-key": OPENAI_API_KEY or ""}
+    else:
+        url = f"{base}/chat/completions"
+        headers = {}
+        if OPENAI_API_KEY:
+            headers["Authorization"] = f"Bearer {OPENAI_API_KEY}"
+
+    body: dict[str, Any] = {
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+        "max_completion_tokens": 2048,
+        "response_format": {"type": "json_object"},
+    }
+    if not is_azure:
+        body["model"] = model
+
+    r = requests.post(url, headers=headers, json=body, timeout=timeout)
     r.raise_for_status()
-    return r.json().get("response", "")
+    return r.json()["choices"][0]["message"]["content"]
 
 
 def _parse_json_response(raw: str) -> tuple[str, str, float | None, str, str]:
@@ -328,12 +377,12 @@ def _parse_json_response(raw: str) -> tuple[str, str, float | None, str, str]:
 
 
 def infer_lessons_batch(sessions: list[Session], model: str) -> None:
-    """Run Ollama over all sessions after they're all collected. Cached by row hash."""
+    """Run OpenAI-compatible API over all sessions. Cached by row hash."""
     if not sessions:
         return
     cache = _load_cache()
     total = len(sessions)
-    print(f"\n🤖  Running Ollama ({model}) on {total} sessions...")
+    print(f"\n🤖  Running AI ({model}) on {total} sessions...")
     hits = 0
     for i, s in enumerate(sessions, 1):
         h = s.row_hash()
@@ -357,7 +406,7 @@ def infer_lessons_batch(sessions: list[Session], model: str) -> None:
             user_lesson=_truncate(s.user_lesson, 600) or "(trống)",
         )
         try:
-            raw = _call_ollama(model, prompt)
+            raw = _call_openai(model, prompt)
             ai_lesson, comparison, ai_rating, reason, suggested = _parse_json_response(raw)
             s.ai_lesson = ai_lesson
             s.comparison = comparison or ("Người dùng để trống" if not s.user_lesson else "Khác biệt")
@@ -374,7 +423,7 @@ def infer_lessons_batch(sessions: list[Session], model: str) -> None:
             rating_str = f"{ai_rating:.0f}★" if ai_rating else "—"
             print(f"  [{i}/{total}] {s.staff} — {s.title[:50]}  →  {s.comparison} ({rating_str})")
         except requests.RequestException as e:
-            s.ai_lesson = f"[Lỗi Ollama: {e}]"
+            s.ai_lesson = f"[Lỗi AI: {e}]"
             s.comparison = "—"
             print(f"  [{i}/{total}] ⚠  {e}", file=sys.stderr)
     _save_cache(cache)
@@ -382,7 +431,7 @@ def infer_lessons_batch(sessions: list[Session], model: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Report builder
+# Report builder — helpers
 # --------------------------------------------------------------------------- #
 
 def _fmt_date(d: Any) -> str:
@@ -426,59 +475,87 @@ def _title_block(ws, title: str, subtitle: str, n_cols: int) -> int:
     return 4  # header row
 
 
+def _write_total_row(ws, row: int, n_cols: int, hr: int, sum_cols: list[int],
+                     avg_cols: list[int] | None = None) -> None:
+    """Write a styled TỔNG row with SUM/AVERAGE formulas."""
+    ws.cell(row=row, column=1, value="TỔNG")
+    for c in sum_cols:
+        col_letter = get_column_letter(c)
+        ws.cell(row=row, column=c, value=f"=SUM({col_letter}{hr+1}:{col_letter}{row-1})")
+    for c in (avg_cols or []):
+        col_letter = get_column_letter(c)
+        ws.cell(row=row, column=c,
+                value=f"=IFERROR(AVERAGE({col_letter}{hr+1}:{col_letter}{row-1}),0)")
+    for c in range(1, n_cols + 1):
+        cell = ws.cell(row=row, column=c)
+        cell.fill = TOTAL_FILL
+        cell.font = TOTAL_FONT
+
+
+# --------------------------------------------------------------------------- #
+# Report builder — sheets
+# --------------------------------------------------------------------------- #
+
 def build_summary_sheet(wb: Workbook, sessions: list[Session]) -> None:
     ws = wb.create_sheet("📊 Tổng Quan")
-    n_cols = 5
-    header_row = _title_block(
+    a = _agg(sessions)
+    n_staff = len({s.staff for s in sessions})
+    n_cols = 7
+    hr = _title_block(
         ws,
         "📊  TỔNG QUAN  —  AI Dev Journal Consolidated Report",
         f"Generated {datetime.now().strftime('%d/%m/%Y %H:%M')}  •  "
-        f"{len({s.staff for s in sessions})} staff  •  {len(sessions)} sessions",
+        f"{n_staff} staff  •  {a['n']} sessions",
         n_cols,
     )
 
-    headers = ["Chỉ Số", "Giá Trị", "", "Top 5 Công Cụ AI", "Số Phiên"]
+    headers = ["Chỉ Số", "Giá Trị", "", "Top 5 Công Cụ AI", "Phiên", "Giờ Tiết Kiệm", "Hiệu Suất %"]
     for i, h in enumerate(headers, 1):
-        ws.cell(row=header_row, column=i, value=h)
-    _style_header(ws, header_row, n_cols)
-
-    # KPIs
-    total_sessions = len(sessions)
-    total_hours = sum(s.hours_saved or 0 for s in sessions)
-    rated = [s.rating for s in sessions if s.rating]
-    avg_rating = sum(rated) / len(rated) if rated else 0
-    excellent = sum(1 for s in sessions if s.rating == 5)
-    n_staff = len({s.staff for s in sessions})
+        ws.cell(row=hr, column=i, value=h)
+    _style_header(ws, hr, n_cols)
 
     kpis = [
-        ("Tổng số phiên", total_sessions),
-        ("Tổng giờ tiết kiệm", round(total_hours, 1)),
-        ("Chất lượng trung bình", f"{avg_rating:.2f} / 5"),
-        ("Phiên xuất sắc (5★)", excellent),
+        ("Tổng số phiên", a["n"]),
         ("Số staff", n_staff),
+        ("Tổng EST (không AI)", f"{a['est']}h"),
+        ("Tổng Actual (có AI)", f"{a['actual']}h"),
+        ("Tổng giờ tiết kiệm", f"{a['saved']}h"),
+        ("Hiệu suất AI", f"{a['eff']}%"),
+        ("Giờ tiết kiệm TB/phiên", f"{a['avg_saved']}h"),
+        ("Chất lượng trung bình", f"{a['avg_rating']} / 5"),
+        ("Phiên xuất sắc (5★)", a["excellent"]),
     ]
     for i, (k, v) in enumerate(kpis):
-        ws.cell(row=header_row + 1 + i, column=1, value=k).font = CELL_FONT
-        ws.cell(row=header_row + 1 + i, column=2, value=v).font = CELL_FONT
+        ws.cell(row=hr + 1 + i, column=1, value=k).font = CELL_FONT
+        ws.cell(row=hr + 1 + i, column=2, value=v).font = NUMBER_FONT
 
-    # Top tools
-    tool_counts: dict[str, int] = {}
+    # Top tools by time saved
+    tool_data: dict[str, dict] = {}
     for s in sessions:
         if s.tool:
-            tool_counts[s.tool] = tool_counts.get(s.tool, 0) + 1
-    top_tools = sorted(tool_counts.items(), key=lambda x: -x[1])[:5]
-    for i, (t, n) in enumerate(top_tools):
-        ws.cell(row=header_row + 1 + i, column=4, value=t).font = CELL_FONT
-        ws.cell(row=header_row + 1 + i, column=5, value=n).font = CELL_FONT
+            d = tool_data.setdefault(s.tool, {"n": 0, "saved": 0.0, "est": 0.0})
+            d["n"] += 1
+            d["saved"] += s.time_saved or 0
+            d["est"] += s.est_hours or 0
+    top_tools = sorted(tool_data.items(), key=lambda x: -x[1]["saved"])[:5]
+    for i, (t, d) in enumerate(top_tools):
+        eff = (d["saved"] / d["est"] * 100) if d["est"] else 0
+        ws.cell(row=hr + 1 + i, column=4, value=t).font = CELL_FONT
+        ws.cell(row=hr + 1 + i, column=5, value=d["n"]).font = NUMBER_FONT
+        ws.cell(row=hr + 1 + i, column=6, value=round(d["saved"], 1)).font = NUMBER_FONT
+        ws.cell(row=hr + 1 + i, column=7, value=f"{eff:.0f}%").font = NUMBER_FONT
 
-    last_row = header_row + max(len(kpis), len(top_tools))
-    _style_data_range(ws, header_row + 1, last_row, n_cols)
-    _set_widths(ws, [26, 18, 3, 30, 14])
+    last_row = hr + max(len(kpis), len(top_tools))
+    _style_data_range(ws, hr + 1, last_row, n_cols)
+    _set_widths(ws, [28, 18, 3, 30, 10, 16, 14])
 
 
 def build_per_staff_sheet(wb: Workbook, sessions: list[Session]) -> None:
     ws = wb.create_sheet("👤 Per Staff")
-    headers = ["Staff", "Số Phiên", "Giờ Tiết Kiệm", "Chất Lượng TB", "Phiên 5★", "Công Cụ Chính"]
+    headers = [
+        "Staff", "Số Phiên", "EST (h)", "Actual (h)", "Tiết Kiệm (h)",
+        "Hiệu Suất %", "TB Tiết Kiệm/Phiên", "Rating TB", "Phiên 5★", "Công Cụ Chính",
+    ]
     n_cols = len(headers)
     hr = _title_block(ws, "👤  THỐNG KÊ THEO STAFF", "Ranking by total hours saved", n_cols)
     for i, h in enumerate(headers, 1):
@@ -491,41 +568,74 @@ def build_per_staff_sheet(wb: Workbook, sessions: list[Session]) -> None:
 
     rows = []
     for staff, items in by_staff.items():
-        hours = sum(s.hours_saved or 0 for s in items)
-        rated = [s.rating for s in items if s.rating]
-        avg = sum(rated) / len(rated) if rated else 0
-        excellent = sum(1 for s in items if s.rating == 5)
+        a = _agg(items)
         tools: dict[str, int] = {}
         for s in items:
             if s.tool:
                 tools[s.tool] = tools.get(s.tool, 0) + 1
         main_tool = max(tools.items(), key=lambda x: x[1])[0] if tools else "—"
-        rows.append((staff, len(items), round(hours, 1), round(avg, 2), excellent, main_tool))
+        rows.append((
+            staff, a["n"], a["est"], a["actual"], a["saved"],
+            a["eff"], a["avg_saved"], a["avg_rating"], a["excellent"], main_tool,
+        ))
 
-    rows.sort(key=lambda r: -r[2])  # by hours saved
+    rows.sort(key=lambda r: -r[4])  # by hours saved
     for i, row in enumerate(rows):
         for j, v in enumerate(row, 1):
             ws.cell(row=hr + 1 + i, column=j, value=v)
 
-    # Total row
     total_row = hr + 1 + len(rows)
-    ws.cell(row=total_row, column=1, value="TỔNG")
-    ws.cell(row=total_row, column=2, value=f"=SUM(B{hr+1}:B{total_row-1})")
-    ws.cell(row=total_row, column=3, value=f"=SUM(C{hr+1}:C{total_row-1})")
-    ws.cell(row=total_row, column=4, value=f"=IFERROR(AVERAGE(D{hr+1}:D{total_row-1}),0)")
-    ws.cell(row=total_row, column=5, value=f"=SUM(E{hr+1}:E{total_row-1})")
-    for c in range(1, n_cols + 1):
-        cell = ws.cell(row=total_row, column=c)
-        cell.fill = TOTAL_FILL
-        cell.font = TOTAL_FONT
-
+    _write_total_row(ws, total_row, n_cols, hr,
+                     sum_cols=[2, 3, 4, 5, 9],
+                     avg_cols=[6, 7, 8])
     _style_data_range(ws, hr + 1, total_row, n_cols)
-    _set_widths(ws, [18, 12, 16, 16, 12, 24])
+    _set_widths(ws, [16, 10, 12, 12, 14, 12, 16, 10, 10, 24])
+
+
+def build_per_tool_sheet(wb: Workbook, sessions: list[Session]) -> None:
+    ws = wb.create_sheet("🔧 Per Tool")
+    headers = [
+        "Công Cụ AI", "Số Phiên", "EST (h)", "Actual (h)", "Tiết Kiệm (h)",
+        "Hiệu Suất %", "TB Tiết Kiệm/Phiên", "Rating TB", "Phiên 5★",
+    ]
+    n_cols = len(headers)
+    hr = _title_block(ws, "🔧  THỐNG KÊ THEO CÔNG CỤ AI", "Ranking by total hours saved", n_cols)
+    for i, h in enumerate(headers, 1):
+        ws.cell(row=hr, column=i, value=h)
+    _style_header(ws, hr, n_cols)
+
+    by_tool: dict[str, list[Session]] = {}
+    for s in sessions:
+        key = s.tool or "(không rõ)"
+        by_tool.setdefault(key, []).append(s)
+
+    rows = []
+    for tool, items in by_tool.items():
+        a = _agg(items)
+        rows.append((
+            tool, a["n"], a["est"], a["actual"], a["saved"],
+            a["eff"], a["avg_saved"], a["avg_rating"], a["excellent"],
+        ))
+
+    rows.sort(key=lambda r: -r[4])
+    for i, row in enumerate(rows):
+        for j, v in enumerate(row, 1):
+            ws.cell(row=hr + 1 + i, column=j, value=v)
+
+    total_row = hr + 1 + len(rows)
+    _write_total_row(ws, total_row, n_cols, hr,
+                     sum_cols=[2, 3, 4, 5, 9],
+                     avg_cols=[6, 7, 8])
+    _style_data_range(ws, hr + 1, total_row, n_cols)
+    _set_widths(ws, [24, 10, 12, 12, 14, 12, 16, 10, 10])
 
 
 def build_per_category_sheet(wb: Workbook, sessions: list[Session]) -> None:
     ws = wb.create_sheet("📂 Per Category")
-    headers = ["Danh Mục", "Số Phiên", "Giờ Tiết Kiệm", "Chất Lượng TB", "Phiên 5★"]
+    headers = [
+        "Danh Mục", "Số Phiên", "EST (h)", "Actual (h)", "Tiết Kiệm (h)",
+        "Hiệu Suất %", "TB Tiết Kiệm/Phiên", "Rating TB", "Phiên 5★",
+    ]
     n_cols = len(headers)
     hr = _title_block(ws, "📂  THỐNG KÊ THEO DANH MỤC", "Sorted by total hours saved", n_cols)
     for i, h in enumerate(headers, 1):
@@ -539,35 +649,28 @@ def build_per_category_sheet(wb: Workbook, sessions: list[Session]) -> None:
 
     rows = []
     for cat, items in by_cat.items():
-        hours = sum(s.hours_saved or 0 for s in items)
-        rated = [s.rating for s in items if s.rating]
-        avg = sum(rated) / len(rated) if rated else 0
-        excellent = sum(1 for s in items if s.rating == 5)
-        rows.append((cat, len(items), round(hours, 1), round(avg, 2), excellent))
+        a = _agg(items)
+        rows.append((
+            cat, a["n"], a["est"], a["actual"], a["saved"],
+            a["eff"], a["avg_saved"], a["avg_rating"], a["excellent"],
+        ))
 
-    rows.sort(key=lambda r: -r[2])
+    rows.sort(key=lambda r: -r[4])
     for i, row in enumerate(rows):
         for j, v in enumerate(row, 1):
             ws.cell(row=hr + 1 + i, column=j, value=v)
 
     total_row = hr + 1 + len(rows)
-    ws.cell(row=total_row, column=1, value="TỔNG")
-    ws.cell(row=total_row, column=2, value=f"=SUM(B{hr+1}:B{total_row-1})")
-    ws.cell(row=total_row, column=3, value=f"=SUM(C{hr+1}:C{total_row-1})")
-    ws.cell(row=total_row, column=4, value=f"=IFERROR(AVERAGE(D{hr+1}:D{total_row-1}),0)")
-    ws.cell(row=total_row, column=5, value=f"=SUM(E{hr+1}:E{total_row-1})")
-    for c in range(1, n_cols + 1):
-        cell = ws.cell(row=total_row, column=c)
-        cell.fill = TOTAL_FILL
-        cell.font = TOTAL_FONT
-
+    _write_total_row(ws, total_row, n_cols, hr,
+                     sum_cols=[2, 3, 4, 5, 9],
+                     avg_cols=[6, 7, 8])
     _style_data_range(ws, hr + 1, total_row, n_cols)
-    _set_widths(ws, [24, 12, 16, 16, 12])
+    _set_widths(ws, [24, 10, 12, 12, 14, 12, 16, 10, 10])
 
 
 def build_time_trend_sheet(wb: Workbook, sessions: list[Session]) -> None:
     ws = wb.create_sheet("📅 Time Trend")
-    headers = ["Ngày", "Số Phiên", "Giờ Tiết Kiệm", "Chất Lượng TB"]
+    headers = ["Ngày", "Số Phiên", "EST (h)", "Actual (h)", "Tiết Kiệm (h)", "Hiệu Suất %", "Rating TB"]
     n_cols = len(headers)
     hr = _title_block(ws, "📅  XU HƯỚNG THEO NGÀY", "Daily activity across all staff", n_cols)
     for i, h in enumerate(headers, 1):
@@ -586,17 +689,17 @@ def build_time_trend_sheet(wb: Workbook, sessions: list[Session]) -> None:
             return datetime.max
 
     for i, day in enumerate(sorted(by_day.keys(), key=_sort_key)):
-        items = by_day[day]
-        hours = sum(s.hours_saved or 0 for s in items)
-        rated = [s.rating for s in items if s.rating]
-        avg = sum(rated) / len(rated) if rated else 0
+        a = _agg(by_day[day])
         ws.cell(row=hr + 1 + i, column=1, value=day)
-        ws.cell(row=hr + 1 + i, column=2, value=len(items))
-        ws.cell(row=hr + 1 + i, column=3, value=round(hours, 1))
-        ws.cell(row=hr + 1 + i, column=4, value=round(avg, 2))
+        ws.cell(row=hr + 1 + i, column=2, value=a["n"])
+        ws.cell(row=hr + 1 + i, column=3, value=a["est"])
+        ws.cell(row=hr + 1 + i, column=4, value=a["actual"])
+        ws.cell(row=hr + 1 + i, column=5, value=a["saved"])
+        ws.cell(row=hr + 1 + i, column=6, value=a["eff"])
+        ws.cell(row=hr + 1 + i, column=7, value=a["avg_rating"])
 
     _style_data_range(ws, hr + 1, hr + len(by_day), n_cols)
-    _set_widths(ws, [16, 12, 16, 16])
+    _set_widths(ws, [16, 10, 12, 12, 14, 12, 10])
 
 
 def _build_pivot(
@@ -611,7 +714,7 @@ def _build_pivot(
     col_values = sorted({getattr(s, col_attr) or "(none)" for s in sessions})
 
     n_cols = len(col_values) + 2  # Staff + values + TỔNG
-    hr = _title_block(ws, title, "Cell = số phiên (giờ tiết kiệm)", n_cols)
+    hr = _title_block(ws, title, "Cell = sessions | EST → Actual (saved)", n_cols)
 
     ws.cell(row=hr, column=1, value="Staff \\ " + col_attr)
     for i, v in enumerate(col_values, 2):
@@ -622,28 +725,32 @@ def _build_pivot(
     for ri, staff in enumerate(staff_list):
         ws.cell(row=hr + 1 + ri, column=1, value=staff)
         staff_total_n = 0
-        staff_total_h = 0.0
+        staff_total_est = 0.0
+        staff_total_actual = 0.0
+        staff_total_saved = 0.0
         for ci, v in enumerate(col_values, 2):
             items = [
                 s for s in sessions
                 if s.staff == staff and (getattr(s, col_attr) or "(none)") == v
             ]
             if items:
-                n = len(items)
-                h = sum(s.hours_saved or 0 for s in items)
-                ws.cell(row=hr + 1 + ri, column=ci, value=f"{n} ({h:.1f}h)")
-                staff_total_n += n
-                staff_total_h += h
+                a = _agg(items)
+                ws.cell(row=hr + 1 + ri, column=ci,
+                        value=f"{a['n']} | {a['est']}→{a['actual']} ({a['saved']}h)")
+                staff_total_n += a["n"]
+                staff_total_est += a["est"]
+                staff_total_actual += a["actual"]
+                staff_total_saved += a["saved"]
             else:
                 ws.cell(row=hr + 1 + ri, column=ci, value="—")
         ws.cell(
             row=hr + 1 + ri,
             column=n_cols,
-            value=f"{staff_total_n} ({staff_total_h:.1f}h)",
+            value=f"{staff_total_n} | {staff_total_est:.1f}→{staff_total_actual:.1f} ({staff_total_saved:.1f}h)",
         ).font = TOTAL_FONT
 
     _style_data_range(ws, hr + 1, hr + len(staff_list), n_cols)
-    widths = [18] + [18] * len(col_values) + [16]
+    widths = [18] + [28] * len(col_values) + [28]
     _set_widths(ws, widths)
 
 
@@ -651,14 +758,14 @@ def build_raw_log_sheet(wb: Workbook, sessions: list[Session]) -> None:
     ws = wb.create_sheet("📝 Raw Log")
     headers = [
         "Staff", "Ngày", "Tên Phiên", "Công Cụ", "Danh Mục",
-        "Mô Tả", "Rating", "Giờ Tiết Kiệm", "Bài Học Người Dùng",
-        "Tags", "Source File",
+        "Mô Tả", "Rating", "EST (h)", "Actual (h)", "Tiết Kiệm (h)",
+        "Hiệu Suất %", "Bài Học Người Dùng", "Tags", "Source File",
     ]
     n_cols = len(headers)
     hr = _title_block(
         ws,
         "📝  RAW LOG  —  Consolidated Sessions",
-        f"{len(sessions)} rows (no dedup — kept per your request)",
+        f"{len(sessions)} rows",
         n_cols,
     )
     for i, h in enumerate(headers, 1):
@@ -667,6 +774,7 @@ def build_raw_log_sheet(wb: Workbook, sessions: list[Session]) -> None:
 
     for i, s in enumerate(sessions):
         r = hr + 1 + i
+        eff = f"{s.efficiency * 100:.0f}%" if s.efficiency is not None else "—"
         ws.cell(row=r, column=1, value=s.staff)
         ws.cell(row=r, column=2, value=_fmt_date(s.date))
         ws.cell(row=r, column=3, value=s.title)
@@ -674,13 +782,16 @@ def build_raw_log_sheet(wb: Workbook, sessions: list[Session]) -> None:
         ws.cell(row=r, column=5, value=s.category)
         ws.cell(row=r, column=6, value=s.task_desc)
         ws.cell(row=r, column=7, value=s.rating)
-        ws.cell(row=r, column=8, value=s.hours_saved)
-        ws.cell(row=r, column=9, value=s.user_lesson)
-        ws.cell(row=r, column=10, value=s.tags)
-        ws.cell(row=r, column=11, value=s.source_file)
+        ws.cell(row=r, column=8, value=s.est_hours)
+        ws.cell(row=r, column=9, value=s.actual_hours)
+        ws.cell(row=r, column=10, value=s.time_saved)
+        ws.cell(row=r, column=11, value=eff)
+        ws.cell(row=r, column=12, value=s.user_lesson)
+        ws.cell(row=r, column=13, value=s.tags)
+        ws.cell(row=r, column=14, value=s.source_file)
 
     _style_data_range(ws, hr + 1, hr + len(sessions), n_cols)
-    _set_widths(ws, [14, 12, 32, 16, 16, 40, 10, 14, 40, 24, 22])
+    _set_widths(ws, [14, 12, 32, 16, 16, 40, 8, 10, 10, 12, 10, 40, 24, 22])
     ws.freeze_panes = ws.cell(row=hr + 1, column=1)
 
 
@@ -759,12 +870,17 @@ def build_ai_comparison_sheet(wb: Workbook, sessions: list[Session]) -> None:
         ws.row_dimensions[r].height = 150
 
 
+# --------------------------------------------------------------------------- #
+# Report orchestrator
+# --------------------------------------------------------------------------- #
+
 def build_report(sessions: list[Session], output: Path, with_ai: bool) -> None:
     wb = Workbook()
     wb.remove(wb.active)
 
     build_summary_sheet(wb, sessions)
     build_per_staff_sheet(wb, sessions)
+    build_per_tool_sheet(wb, sessions)
     build_per_category_sheet(wb, sessions)
     build_time_trend_sheet(wb, sessions)
     _build_pivot(wb, "🔀 Pivot Staff×Tool", "🔀  PIVOT  —  Staff × Công Cụ", sessions, "tool")
@@ -777,6 +893,62 @@ def build_report(sessions: list[Session], output: Path, with_ai: bool) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Terminal summary
+# --------------------------------------------------------------------------- #
+
+def print_terminal_summary(sessions: list[Session]) -> None:
+    a = _agg(sessions)
+    n_staff = len({s.staff for s in sessions})
+
+    print("\n" + "=" * 64)
+    print("  📊  AI DEV JOURNAL — SUMMARY")
+    print("=" * 64)
+    print(f"  Staff: {n_staff}    Sessions: {a['n']}    Rating TB: {a['avg_rating']}/5    5★: {a['excellent']}")
+    print(f"  EST (without AI):  {a['est']:>8}h")
+    print(f"  Actual (with AI):  {a['actual']:>8}h")
+    print(f"  Time saved:        {a['saved']:>8}h")
+    print(f"  Efficiency:        {a['eff']:>7}%")
+    print(f"  Avg saved/session: {a['avg_saved']:>8}h")
+
+    # Per staff
+    by_staff: dict[str, list[Session]] = {}
+    for s in sessions:
+        by_staff.setdefault(s.staff, []).append(s)
+
+    print("\n  ── Per Staff " + "─" * 49)
+    print(f"  {'Staff':<14} {'#':>4} {'EST':>7} {'Actual':>7} {'Saved':>7} {'Eff%':>6} {'Rating':>6}")
+    for staff in sorted(by_staff, key=lambda k: -sum(s.time_saved or 0 for s in by_staff[k])):
+        sa = _agg(by_staff[staff])
+        print(f"  {staff:<14} {sa['n']:>4} {sa['est']:>6}h {sa['actual']:>6}h {sa['saved']:>6}h {sa['eff']:>5}% {sa['avg_rating']:>6}")
+
+    # Per tool
+    by_tool: dict[str, list[Session]] = {}
+    for s in sessions:
+        key = s.tool or "(không rõ)"
+        by_tool.setdefault(key, []).append(s)
+
+    print("\n  ── Per Tool " + "─" * 50)
+    print(f"  {'Tool':<22} {'#':>4} {'EST':>7} {'Actual':>7} {'Saved':>7} {'Eff%':>6}")
+    for tool in sorted(by_tool, key=lambda k: -sum(s.time_saved or 0 for s in by_tool[k])):
+        ta = _agg(by_tool[tool])
+        print(f"  {tool:<22} {ta['n']:>4} {ta['est']:>6}h {ta['actual']:>6}h {ta['saved']:>6}h {ta['eff']:>5}%")
+
+    # Per category
+    by_cat: dict[str, list[Session]] = {}
+    for s in sessions:
+        key = s.category or "(chưa phân loại)"
+        by_cat.setdefault(key, []).append(s)
+
+    print("\n  ── Per Category " + "─" * 46)
+    print(f"  {'Category':<22} {'#':>4} {'EST':>7} {'Actual':>7} {'Saved':>7} {'Eff%':>6}")
+    for cat in sorted(by_cat, key=lambda k: -sum(s.time_saved or 0 for s in by_cat[k])):
+        ca = _agg(by_cat[cat])
+        print(f"  {cat:<22} {ca['n']:>4} {ca['est']:>6}h {ca['actual']:>6}h {ca['saved']:>6}h {ca['eff']:>5}%")
+
+    print("=" * 64)
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 
@@ -786,8 +958,9 @@ def main() -> int:
     )
     ap.add_argument("files", nargs="+", type=Path, help="Input .xlsx files")
     ap.add_argument("-o", "--output", type=Path, default=Path("ai_journal_report.xlsx"))
-    ap.add_argument("--model", default="qwen2.5:7b", help="Ollama model (default: qwen2.5:7b)")
-    ap.add_argument("--no-ai", action="store_true", help="Skip Ollama lesson inference")
+    ap.add_argument("--model", default="qwen2.5:7b",
+                    help="Model name for OpenAI-compatible API (default: qwen2.5:7b)")
+    ap.add_argument("--no-ai", action="store_true", help="Skip AI lesson inference")
     args = ap.parse_args()
 
     all_sessions: list[Session] = []
@@ -811,10 +984,11 @@ def main() -> int:
         try:
             infer_lessons_batch(all_sessions, args.model)
         except Exception as e:
-            print(f"⚠  Ollama inference failed: {e}", file=sys.stderr)
+            print(f"⚠  AI inference failed: {e}", file=sys.stderr)
             print("   Continuing without AI lesson sheet.", file=sys.stderr)
 
     build_report(all_sessions, args.output, with_ai=not args.no_ai)
+    print_terminal_summary(all_sessions)
     print(f"\n✔  Report saved to: {args.output}")
     return 0
 

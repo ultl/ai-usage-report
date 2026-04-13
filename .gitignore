@@ -1,3 +1,4 @@
 *.xlsx
 .ai_journal_cache.json
 out/*
+.env
