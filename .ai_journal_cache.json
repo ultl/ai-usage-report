@@ -1,0 +1,74 @@
+{
+  "d22354490c12a772e96637083aa1242680171e54": {
+    "ai_lesson": "Nên định rõ ràng các business rules và edge case từ đầu để AI tạo ra thiết kế sát thực tế hơn.",
+    "comparison": "Đồng thuận",
+    "ai_rating": 4.0,
+    "ai_rating_reason": "AI đã tạo ra ERD, API và flow đầy đủ, nhưng thiếu xử lý edge case như phép bù, nên chưa tối ưu 100%."
+  },
+  "3a17f191913c75597d237f66efeb0a446b35b81d": {
+    "ai_lesson": "Nên cung cấp context đầy đủ (stack trace, đoạn mã liên quan) để AI debug chính xác hơn.",
+    "comparison": "Đồng thuận",
+    "ai_rating": 4.0,
+    "ai_rating_reason": "AI đã xác định đúng nguyên nhân và đề xuất giải pháp, nhưng có thể cải thiện bằng cách yêu cầu thêm context để tránh hiểu sai."
+  },
+  "6e3927ddebb3b85546824b2a991a948c7a2e0512": {
+    "ai_lesson": "Nên cung cấp cấu trúc rõ ràng và yêu cầu AI phân tích từng endpoint cụ thể để đảm bảo báo cáo chi tiết và chính xác.",
+    "comparison": "Đồng thuận",
+    "ai_rating": 4.0,
+    "ai_rating_reason": "Báo cáo đạt yêu cầu với phân tích bottleneck và khuyến nghị cụ thể, tuy nhiên thiếu bước clean dữ liệu như người dùng đề xuất."
+  },
+  "f721c57d2da6201a98e8ec8a976776258df009d3": {
+    "ai_lesson": "Nên thiết kế prompt rõ ràng với cấu trúc pattern cụ thể để AI sinh ra code đúng yêu cầu, đồng thời bổ sung yêu cầu về kiểm thử và xử lý lỗi.",
+    "comparison": "Đồng thuận",
+    "ai_rating": 4.0,
+    "ai_rating_reason": "Copilot đáp ứng tốt yêu cầu cơ bản, tạo đủ boilerplate theo pattern, nhưng cần điều chỉnh thêm về error handling và test."
+  },
+  "fe6f0334b86db7dceb53d1aab200f79fc7021737": {
+    "ai_lesson": "Nên thiết kế prompt rõ ràng, phân loại và xử lý từng loại lỗi theo batch để tăng hiệu quả sửa lỗi tự động.",
+    "comparison": "Đồng thuận",
+    "ai_rating": 4.0,
+    "ai_rating_reason": "AI đã xử lý 80% lỗi tự động, tiết kiệm thời gian, nhưng cần thêm context cho 20% còn lại."
+  },
+  "38aa6aa0d6d91c81afbc2952b41e1ab9924a1e0f": {
+    "ai_lesson": "Nên cung cấp ví dụ cụ thể (như module Leave) để AI dễ dàng phân tích và tái sử dụng cấu trúc, giúp tăng độ chính xác và hiệu quả.",
+    "comparison": "Đồng thuận",
+    "ai_rating": 4.0,
+    "ai_rating_reason": "AI đã tạo WBS chi tiết và ước lượng thời gian hợp lý, tuy nhiên thiếu phân tích sâu về độ phức tạp của từng layer."
+  },
+  "08b776dc92b2f5167a2ad8d1a79842d241b3cfc9": {
+    "ai_lesson": "Nên định rõ ràng các business rules và edge case từ đầu để AI tạo ra thiết kế sát thực tế hơn.",
+    "comparison": "Đồng thuận",
+    "ai_rating": 4.0,
+    "ai_rating_reason": "AI đã tạo ra ERD, API và flow diagram đầy đủ, nhưng thiếu xử lý edge case như phép bù, nên điểm 4 là hợp lý."
+  },
+  "15ead9d400719713f3fdfb885efe62e68dd44876": {
+    "ai_lesson": "Nên thiết kế prompt rõ ràng, chia nhỏ nhiệm vụ và yêu cầu AI xác định từng loại vấn đề cụ thể (thừa, trùng, không rõ actor) để tăng độ chính xác.",
+    "comparison": "Đồng thuận",
+    "ai_rating": 4.0,
+    "ai_rating_reason": "AI đã tóm tắt hiệu quả và phân tích rõ ràng các bước, tuy nhiên cần thêm xác minh từ stakeholder để đảm bảo tính chính xác nghiệp vụ."
+  },
+  "777a07b4b861ee28c133e5f72ba69d11112aa77f": {
+    "ai_lesson": "Nên chia nhỏ prompt thành các phần cụ thể để AI xử lý từng rule một, tránh quá tải thông tin.",
+    "comparison": "Đồng thuận",
+    "ai_rating": 4.0,
+    "ai_rating_reason": "AI đã liệt kê đầy đủ các rule OT và constraint, tuy nhiên có thể tối ưu hơn bằng cách phân tích từng phần nhỏ hơn."
+  },
+  "af5033c499262ddbbbac1185ccca2a5cc346e6ec": {
+    "ai_lesson": "Nên thiết kế prompt rõ ràng, tập trung vào mục tiêu (ví dụ: tối giản field, align role) để AI đưa ra wireframe phù hợp với nhu cầu thực tế.",
+    "comparison": "Đồng thuận",
+    "ai_rating": 4.0,
+    "ai_rating_reason": "AI đã tạo wireframe draft đúng yêu cầu, hỗ trợ hiệu quả cho BA–PO–HR, nhưng chưa tối ưu hóa độ chi tiết hoặc tương tác người dùng."
+  },
+  "5c899605ade124609180c91a225c78a2fe0ba2ee": {
+    "ai_lesson": "Nên thiết kế prompt rõ ràng, bao gồm cấu trúc mong muốn và dữ liệu đầu vào cụ thể để AI sinh ra tài liệu chuẩn xác và tiết kiệm thời gian.",
+    "comparison": "Đồng thuận",
+    "ai_rating": 4.0,
+    "ai_rating_reason": "AI đã tạo SRS đầy đủ và đúng cấu trúc, giúp tiết kiệm thời gian đáng kể, nhưng có thể tối ưu hơn nếu prompt chi tiết hơn về định dạng mong muốn."
+  },
+  "cb177e0b935567933fa5c3a7efe1e2e6d4e77957": {
+    "ai_lesson": "Nên cấu trúc prompt rõ ràng với các phần cần thiết như mục tiêu, input, và định dạng đầu ra để AI sinh ra tài liệu chuẩn xác và đầy đủ.",
+    "comparison": "Đồng thuận",
+    "ai_rating": 4.0,
+    "ai_rating_reason": "AI đã tạo SRS đầy đủ và đúng cấu trúc, tiết kiệm thời gian đáng kể, nhưng có thể tối ưu thêm bằng cách định nghĩa rõ hơn các yêu cầu đầu vào."
+  }
+}
