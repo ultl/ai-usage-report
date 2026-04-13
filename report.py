@@ -11,6 +11,7 @@ Usage:
     python ai_journal_report.py file1.xlsx file2.xlsx ... -o report.xlsx
     python ai_journal_report.py *.xlsx -o report.xlsx --no-ai
     python ai_journal_report.py *.xlsx -o report.xlsx --model qwen2.5:7b
+    example of file_name = 'journal_khanh.xlsx'
 """
 
 from __future__ import annotations
