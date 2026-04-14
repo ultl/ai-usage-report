@@ -350,7 +350,23 @@ def classify_errors(ai_compare: list[dict], model: str) -> list[dict]:
 SDLC_DETAIL_SECTION = "All Task Details by SDLC Stage"
 
 
-def _read_existing_sdlc_tasks(report_path: Path) -> list[dict[str, str]]:
+def _to_number(value: Any) -> float:
+    if value is None or value == "":
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = re.search(r"-?\d+(?:[.,]\d+)?", str(value))
+    if not match:
+        return 0.0
+    return float(match.group(0).replace(",", "."))
+
+
+def _read_optional_number(ws, row: int, header_map: dict[str, int], header: str) -> float:
+    col = header_map.get(header)
+    return _to_number(ws.cell(row=row, column=col).value) if col else 0.0
+
+
+def _read_existing_sdlc_tasks(report_path: Path) -> list[dict[str, Any]]:
     """Read task/stage rows when the input is already enriched by plot_charts.py."""
     wb = load_workbook(report_path, data_only=True)
     if "🧭 SDLC Summary" not in wb.sheetnames:
@@ -375,7 +391,7 @@ def _read_existing_sdlc_tasks(report_path: Path) -> list[dict[str, str]]:
     if not required.issubset(header_map):
         return []
 
-    rows: list[dict[str, str]] = []
+    rows: list[dict[str, Any]] = []
     for row in range(header_row + 1, ws.max_row + 1):
         stage = str(ws.cell(row=row, column=header_map["SDLC Stage"]).value or "").strip()
         task = str(ws.cell(row=row, column=header_map["Task Name"]).value or "").strip()
@@ -392,11 +408,15 @@ def _read_existing_sdlc_tasks(report_path: Path) -> list[dict[str, str]]:
             "date": str(ws.cell(row=row, column=header_map.get("Ngày", 0)).value or "").strip()
             if header_map.get("Ngày")
             else "",
+            "est": _read_optional_number(ws, row, header_map, "EST (h)"),
+            "actual": _read_optional_number(ws, row, header_map, "Actual (h)"),
+            "saved": _read_optional_number(ws, row, header_map, "Saved (h)"),
+            "efficiency": _read_optional_number(ws, row, header_map, "Efficiency %"),
         })
     return rows
 
 
-def read_sdlc_task_rows(report_path: Path, model: str, no_ai: bool) -> list[dict[str, str]]:
+def read_sdlc_task_rows(report_path: Path, model: str, no_ai: bool) -> list[dict[str, Any]]:
     """Return task/stage rows for the SDLC PDF/PNG chart."""
     existing_rows = _read_existing_sdlc_tasks(report_path)
     if existing_rows:
@@ -417,14 +437,19 @@ def read_sdlc_task_rows(report_path: Path, model: str, no_ai: bool) -> list[dict
             timeout=300,
         )
 
-    rows: list[dict[str, str]] = []
+    rows: list[dict[str, Any]] = []
     for session in sessions:
         stage = session.sdlc_category if session.sdlc_category in SDLC_TAXONOMY else "Other"
+        saved = session.saved_hours
         rows.append({
             "stage": stage,
             "task": session.title or session.task_desc or "(unnamed task)",
             "staff": session.staff,
             "date": session.date,
+            "est": session.est_hours or 0,
+            "actual": session.actual_hours or 0,
+            "saved": saved or 0,
+            "efficiency": round(saved / session.est_hours * 100, 2) if saved is not None and session.est_hours else 0,
         })
     return rows
 
@@ -768,24 +793,32 @@ def _wrap_task_bullets(task_counts: Counter[str], width: int = 72) -> str:
     return "\n".join(lines) if lines else "—"
 
 
-def chart_sdlc_tasks(task_rows: list[dict[str, str]], pdf: PdfPages, out_dir: Path) -> None:
-    """Page 1: SDLC stages on the Y-axis with tasks listed within each stage."""
+def chart_sdlc_tasks(task_rows: list[dict[str, Any]], pdf: PdfPages, out_dir: Path) -> None:
+    """Page 1: SDLC stages on the Y-axis with tasks and efficiency per stage."""
     if not task_rows:
         return
 
     stage_tasks: dict[str, Counter[str]] = {stage: Counter() for stage in SDLC_TAXONOMY}
+    stage_est: dict[str, float] = defaultdict(float)
+    stage_saved: dict[str, float] = defaultdict(float)
     for row in task_rows:
         stage = row.get("stage") or "Other"
         if stage not in SDLC_TAXONOMY:
             stage = "Other"
         task_name = row.get("task") or "(unnamed task)"
         stage_tasks[stage][task_name] += 1
+        stage_est[stage] += _to_number(row.get("est"))
+        stage_saved[stage] += _to_number(row.get("saved"))
 
     stages = [stage for stage in SDLC_TAXONOMY if stage_tasks[stage]]
     if not stages:
         return
 
     counts = [sum(stage_tasks[stage].values()) for stage in stages]
+    efficiency = [
+        (stage_saved[stage] / stage_est[stage] * 100) if stage_est[stage] else 0
+        for stage in stages
+    ]
     max_count = max(counts) if counts else 1
     total_distinct_tasks = sum(len(stage_tasks[stage]) for stage in stages)
     fig_h = min(24, max(7, 2.5 + len(stages) * 0.8 + total_distinct_tasks * 0.22))
@@ -797,7 +830,7 @@ def chart_sdlc_tasks(task_rows: list[dict[str, str]], pdf: PdfPages, out_dir: Pa
         gridspec_kw={"width_ratios": [1.2, 2.3], "wspace": 0.08},
     )
     fig.suptitle(
-        "SDLC Stage to Tasks",
+        "SDLC Stage to Tasks + Efficiency",
         fontsize=16,
         fontweight="bold",
         color=NAVY,
@@ -807,11 +840,11 @@ def chart_sdlc_tasks(task_rows: list[dict[str, str]], pdf: PdfPages, out_dir: Pa
     y = np.arange(len(stages))
     colors = [PALETTE[i % len(PALETTE)] for i in range(len(stages))]
     bars = ax.barh(y, counts, color=colors, alpha=0.85, height=0.6)
-    for bar, count in zip(bars, counts):
+    for bar, count, eff in zip(bars, counts, efficiency):
         ax.text(
             count + max_count * 0.03,
             bar.get_y() + bar.get_height() / 2,
-            f"{count}",
+            f"{count} tasks | {eff:.1f}%",
             va="center",
             fontsize=10,
             fontweight="bold",
@@ -821,7 +854,7 @@ def chart_sdlc_tasks(task_rows: list[dict[str, str]], pdf: PdfPages, out_dir: Pa
     ax.set_yticks(y)
     ax.set_yticklabels(stages, fontsize=10)
     ax.set_xlabel("Task count")
-    ax.set_xlim(0, max_count * 1.25)
+    ax.set_xlim(0, max_count * 1.45)
     ax.grid(axis="x", alpha=0.3)
     ax.invert_yaxis()
     ax.set_title("SDLC stages", fontsize=11, color=GRAY, pad=10)
@@ -834,7 +867,7 @@ def chart_sdlc_tasks(task_rows: list[dict[str, str]], pdf: PdfPages, out_dir: Pa
         ax_text.text(
             0.0,
             idx,
-            _wrap_task_bullets(stage_tasks[stage]),
+            f"Efficiency: {efficiency[idx]:.1f}%\n{_wrap_task_bullets(stage_tasks[stage])}",
             va="center",
             ha="left",
             fontsize=8.2,
@@ -845,7 +878,7 @@ def chart_sdlc_tasks(task_rows: list[dict[str, str]], pdf: PdfPages, out_dir: Pa
     fig.text(
         0.5,
         0.04,
-        "Left side uses SDLC Stage on the Y-axis; right side lists the task names grouped under each stage.",
+        "Left side uses SDLC Stage on the Y-axis; labels show task count and efficiency % = saved hours / EST hours.",
         ha="center",
         fontsize=9,
         color=GRAY,
@@ -888,7 +921,7 @@ def main() -> int:
     elif args.no_ai:
         print("  ⏭️  Skipping AI error classification (--no-ai)")
 
-    sdlc_task_rows: list[dict[str, str]] = []
+    sdlc_task_rows: list[dict[str, Any]] = []
     try:
         sdlc_task_rows = read_sdlc_task_rows(args.report, args.model, args.no_ai)
     except Exception as exc:

@@ -2,7 +2,7 @@
 
 Generate consolidated AI Dev Journal Excel reports from multiple staff journal files, then add chart sheets such as:
 
-- `🧭 SDLC Summary` — task counts plus a stage-axis chart with tasks inside each SDLC Stage
+- `🧭 SDLC Summary` — task counts, efficiency % per SDLC Stage, and a stage-axis chart with tasks inside each SDLC Stage
 - `📈 Efficiency Charts` — EST vs Actual and time saved
 - `⭐ Rating Charts` — user satisfaction by tool
 - `🏷️ Error Charts` / `🏷️ Prompt Error Data` — prompt error classification
@@ -132,7 +132,7 @@ charts_output/*.png
 The PNG/PDF export also includes:
 
 ```text
-charts_output/01_sdlc_tasks_by_stage.png
+charts_output/01_sdlc_tasks_by_stage.png  # includes task count + efficiency % by SDLC Stage
 charts_output/02_staff_ai_effectiveness.png
 ```
 

@@ -863,11 +863,17 @@ def sdlc_task_detail_rows(sessions: list[ReportSession]) -> list[list[Any]]:
         ]
         stage_sessions.sort(key=lambda session: (session.title.casefold(), session.staff.casefold(), session.date))
         for session in stage_sessions:
+            saved = session.saved_hours
+            efficiency = round(saved / session.est_hours * 100, 2) if saved is not None and session.est_hours else 0
             rows.append([
                 category,
                 session.title or session.task_desc or "(unnamed task)",
                 session.staff,
                 session.date,
+                session.est_hours or 0,
+                session.actual_hours or 0,
+                saved or 0,
+                efficiency,
             ])
     return rows
 
@@ -1171,8 +1177,16 @@ def build_sdlc_sheet(wb, sessions: list[ReportSession]) -> None:
 
     summary_counts = Counter(s.sdlc_category for s in sessions)
     total_sessions = len(sessions)
+    sessions_by_stage = {
+        category: [
+            session
+            for session in sessions
+            if (session.sdlc_category if session.sdlc_category in SDLC_TAXONOMY else "Other") == category
+        ]
+        for category in SDLC_TAXONOMY
+    }
 
-    row = _section_label(ws, row, "Tasks by SDLC Stage", n_cols=4)
+    row = _section_label(ws, row, "Tasks and Efficiency by SDLC Stage", n_cols=8)
     task_names_by_stage: dict[str, Counter[str]] = {category: Counter() for category in SDLC_TAXONOMY}
     for session in sessions:
         category = session.sdlc_category if session.sdlc_category in SDLC_TAXONOMY else "Other"
@@ -1189,24 +1203,42 @@ def build_sdlc_sheet(wb, sessions: list[ReportSession]) -> None:
             bullets.append(f"• {task_name}{suffix}")
         return "\n".join(bullets)
 
-    summary_rows = [
-        [
+    summary_rows = []
+    for category in SDLC_TAXONOMY:
+        aggregate = aggregate_sessions(sessions_by_stage[category])
+        summary_rows.append([
             category,
             _format_task_names(category),
             summary_counts[category],
             round(summary_counts[category] / total_sessions * 100, 1) if total_sessions else 0,
-        ]
-        for category in SDLC_TAXONOMY
-    ]
+            aggregate["est"],
+            aggregate["actual"],
+            aggregate["saved"],
+            aggregate["efficiency"],
+        ])
     summary_start = row
     summary_end, _ = _write_table(
         ws,
         row,
         1,
-        ["SDLC Stage", "Task Names", "Task Count", "Share %"],
+        ["SDLC Stage", "Task Names", "Task Count", "Share %", "EST (h)", "Actual (h)", "Saved (h)", "Efficiency %"],
         summary_rows,
     )
     _bar_chart(ws, "Tasks by SDLC Stage", summary_start, summary_end, 3, 3, 1, "F4", y_title="Tasks")
+    _bar_chart(
+        ws,
+        "Efficiency % by SDLC Stage",
+        summary_start,
+        summary_end,
+        8,
+        8,
+        1,
+        "O4",
+        y_title="Efficiency %",
+        chart_type="bar",
+        height=10,
+        width=18,
+    )
 
     staff_list, matrix_rows = sdlc_staff_matrix(sessions)
     matrix_row = summary_end + 3
@@ -1256,13 +1288,13 @@ def build_sdlc_sheet(wb, sessions: list[ReportSession]) -> None:
 
     detail_rows = sdlc_task_detail_rows(sessions)
     detail_row = task_end + 3
-    detail_row = _section_label(ws, detail_row, "All Task Details by SDLC Stage", n_cols=4)
+    detail_row = _section_label(ws, detail_row, "All Task Details by SDLC Stage", n_cols=8)
     detail_start = detail_row
     detail_end, _ = _write_table(
         ws,
         detail_row,
         1,
-        ["SDLC Stage", "Task Name", "Staff", "Ngày"],
+        ["SDLC Stage", "Task Name", "Staff", "Ngày", "EST (h)", "Actual (h)", "Saved (h)", "Efficiency %"],
         detail_rows,
     )
 
@@ -1426,9 +1458,9 @@ def _set_professional_filter(ws) -> None:
         for row in range(1, ws.max_row + 1):
             if ws.cell(row=row, column=1).value == "All Task Details by SDLC Stage":
                 header_row = row + 1
-                end_row = _contiguous_table_end(ws, header_row, 4)
+                end_row = _contiguous_table_end(ws, header_row, 8)
                 if end_row > header_row:
-                    ws.auto_filter.ref = f"A{header_row}:D{end_row}"
+                    ws.auto_filter.ref = f"A{header_row}:H{end_row}"
                 return
     if ws.title not in filter_sheet_names:
         return
