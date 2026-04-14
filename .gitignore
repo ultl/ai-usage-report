@@ -4,3 +4,4 @@
 out/*
 .env
 .omx/
+charts_output/

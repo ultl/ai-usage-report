@@ -33,6 +33,7 @@ from typing import Any
 import requests
 from openpyxl import load_workbook
 from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -142,6 +143,19 @@ THIN = Side(border_style="thin", color="BFBFBF")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 LEFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+PROFESSIONAL_NAVY = "17365D"
+PROFESSIONAL_BLUE = "1F4E78"
+PROFESSIONAL_TEAL = "00A6A6"
+PROFESSIONAL_ORANGE = "ED7D31"
+PROFESSIONAL_LIGHT_BLUE = "DDEBF7"
+PROFESSIONAL_ALT_FILL = PatternFill("solid", start_color="F7FBFF")
+PROFESSIONAL_HEADER_FILL = PatternFill("solid", start_color=PROFESSIONAL_NAVY)
+PROFESSIONAL_SECTION_FILL = PatternFill("solid", start_color=PROFESSIONAL_LIGHT_BLUE)
+PROFESSIONAL_HEADER_FONT = Font(name="Aptos", bold=True, color="FFFFFF", size=11)
+PROFESSIONAL_TITLE_FONT = Font(name="Aptos Display", bold=True, size=16, color=PROFESSIONAL_NAVY)
+PROFESSIONAL_SUBTITLE_FONT = Font(name="Aptos", italic=True, size=10, color="666666")
+PROFESSIONAL_BODY_FONT = Font(name="Aptos", size=10, color="1F1F1F")
 
 
 # --------------------------------------------------------------------------- #
@@ -810,6 +824,54 @@ def sdlc_staff_matrix(sessions: list[ReportSession]) -> tuple[list[str], list[li
     return staff_list, rows
 
 
+def sdlc_task_chart_matrix(sessions: list[ReportSession]) -> tuple[list[str], list[list[Any]]]:
+    task_counts_by_stage: dict[str, Counter[str]] = {category: Counter() for category in SDLC_TAXONOMY}
+    for category in SDLC_TAXONOMY:
+        stage_sessions = []
+        for session in sessions:
+            session_category = session.sdlc_category if session.sdlc_category in SDLC_TAXONOMY else "Other"
+            if session_category == category:
+                stage_sessions.append(session)
+        stage_sessions.sort(key=lambda session: (session.title.casefold(), session.staff.casefold(), session.date))
+        task_counts_by_stage[category].update(
+            session.title or session.task_desc or "(unnamed task)"
+            for session in stage_sessions
+        )
+
+    task_names: list[str] = []
+    seen: set[str] = set()
+    for category in SDLC_TAXONOMY:
+        for task_name in task_counts_by_stage[category]:
+            if task_name not in seen:
+                seen.add(task_name)
+                task_names.append(task_name)
+
+    rows = [
+        [category, *[task_counts_by_stage[category][task_name] for task_name in task_names]]
+        for category in SDLC_TAXONOMY
+    ]
+    return task_names, rows
+
+
+def sdlc_task_detail_rows(sessions: list[ReportSession]) -> list[list[Any]]:
+    rows: list[list[Any]] = []
+    for category in SDLC_TAXONOMY:
+        stage_sessions = [
+            session
+            for session in sessions
+            if (session.sdlc_category if session.sdlc_category in SDLC_TAXONOMY else "Other") == category
+        ]
+        stage_sessions.sort(key=lambda session: (session.title.casefold(), session.staff.casefold(), session.date))
+        for session in stage_sessions:
+            rows.append([
+                category,
+                session.title or session.task_desc or "(unnamed task)",
+                session.staff,
+                session.date,
+            ])
+    return rows
+
+
 # --------------------------------------------------------------------------- #
 # Excel writing helpers
 # --------------------------------------------------------------------------- #
@@ -873,11 +935,14 @@ def _bar_chart(
     anchor: str,
     y_title: str = "Value",
     stacked: bool = False,
+    chart_type: str = "col",
+    height: float = 9,
+    width: float = 18,
 ) -> None:
     if max_row <= min_row:
         return
     chart = BarChart()
-    chart.type = "col"
+    chart.type = chart_type
     chart.style = 10
     chart.title = title
     chart.y_axis.title = y_title
@@ -889,8 +954,8 @@ def _bar_chart(
     cats = Reference(ws, min_col=category_col, min_row=min_row + 1, max_row=max_row)
     chart.add_data(data, titles_from_data=True)
     chart.set_categories(cats)
-    chart.height = 9
-    chart.width = 18
+    chart.height = height
+    chart.width = width
     ws.add_chart(chart, anchor)
 
 
@@ -1162,11 +1227,283 @@ def build_sdlc_sheet(wb, sessions: list[ReportSession]) -> None:
             stacked=True,
         )
 
-    _set_widths(ws, [30, 86, 12, 10, 4, 22, 22, 22, 22, 22])
+    task_names, task_chart_rows = sdlc_task_chart_matrix(sessions)
+    task_row = matrix_end + 3
+    task_row = _section_label(ws, task_row, "All Tasks Within Each SDLC Stage", n_cols=max(5, len(task_names) + 1))
+    task_start = task_row
+    task_end, _ = _write_table(
+        ws,
+        task_row,
+        1,
+        ["SDLC Stage", *task_names],
+        task_chart_rows,
+    )
+    _bar_chart(
+        ws,
+        "Tasks Within Each SDLC Stage",
+        task_start,
+        task_end,
+        2,
+        len(task_names) + 1,
+        1,
+        "F40",
+        y_title="SDLC Stage",
+        stacked=True,
+        chart_type="bar",
+        height=16,
+        width=30,
+    )
+
+    detail_rows = sdlc_task_detail_rows(sessions)
+    detail_row = task_end + 3
+    detail_row = _section_label(ws, detail_row, "All Task Details by SDLC Stage", n_cols=4)
+    detail_start = detail_row
+    detail_end, _ = _write_table(
+        ws,
+        detail_row,
+        1,
+        ["SDLC Stage", "Task Name", "Staff", "Ngày"],
+        detail_rows,
+    )
+
+    widths = [30, *([18] * len(task_names))]
+    if len(widths) >= 2:
+        widths[1] = 46
+    if len(widths) >= 3:
+        widths[2] = max(widths[2], 16)
+    if len(widths) >= 4:
+        widths[3] = max(widths[3], 12)
+    _set_widths(ws, widths)
     ws.freeze_panes = "A6"
     for row_idx in range(summary_start + 1, summary_end + 1):
         task_count = ws.cell(row=row_idx, column=3).value or 0
         ws.row_dimensions[row_idx].height = min(180, max(42, 18 * int(task_count)))
+    for row_idx in range(task_start + 1, task_end + 1):
+        ws.row_dimensions[row_idx].height = 28
+    for row_idx in range(detail_start + 1, detail_end + 1):
+        ws.row_dimensions[row_idx].height = 36
+
+
+def _last_used_row(ws) -> int:
+    for row in range(ws.max_row, 0, -1):
+        if any(ws.cell(row=row, column=col).value not in (None, "") for col in range(1, ws.max_column + 1)):
+            return row
+    return 1
+
+
+def _last_used_col(ws) -> int:
+    for col in range(ws.max_column, 0, -1):
+        if any(ws.cell(row=row, column=col).value not in (None, "") for row in range(1, ws.max_row + 1)):
+            return col
+    return 1
+
+
+def _row_values(ws, row: int, max_col: int) -> list[str]:
+    return [str(ws.cell(row=row, column=col).value or "").strip() for col in range(1, max_col + 1)]
+
+
+def _looks_like_header(values: list[str]) -> bool:
+    nonempty = [value for value in values if value]
+    if len(nonempty) < 2:
+        return False
+    normalized = {value.casefold() for value in nonempty}
+    header_markers = {
+        "staff",
+        "ngày",
+        "tên phiên",
+        "công cụ",
+        "công cụ ai",
+        "danh mục",
+        "group",
+        "sessions",
+        "sdlc stage",
+        "task name",
+        "error label",
+        "tool",
+        "chỉ số",
+        "giá trị",
+        "rating",
+    }
+    return bool(normalized & header_markers)
+
+
+def _iter_header_rows(ws) -> list[tuple[int, int]]:
+    max_col = _last_used_col(ws)
+    rows: list[tuple[int, int]] = []
+    for row in range(1, min(_last_used_row(ws), 120) + 1):
+        values = _row_values(ws, row, max_col)
+        if _looks_like_header(values):
+            header_width = max((idx for idx, value in enumerate(values, 1) if value), default=max_col)
+            rows.append((row, header_width))
+    return rows
+
+
+def _contiguous_table_end(ws, header_row: int, max_col: int) -> int:
+    row = header_row + 1
+    while row <= ws.max_row:
+        if not any(ws.cell(row=row, column=col).value not in (None, "") for col in range(1, max_col + 1)):
+            return row - 1
+        row += 1
+    return ws.max_row
+
+
+def _format_numeric_columns(ws, header_row: int, max_col: int, end_row: int) -> None:
+    if end_row <= header_row:
+        return
+    for col in range(1, max_col + 1):
+        header = str(ws.cell(row=header_row, column=col).value or "")
+        header_cf = header.casefold()
+        number_format: str | None = None
+        if "%" in header or "tỷ lệ" in header_cf or "eff" in header_cf:
+            number_format = "0.0"
+        elif "(h)" in header_cf or "saved" in header_cf or "tiết kiệm" in header_cf or "actual" in header_cf or "est" in header_cf:
+            number_format = "0.0"
+        elif "rating" in header_cf or "★" in header:
+            number_format = "0.0"
+        elif "phiên" in header_cf or "sessions" in header_cf or "count" in header_cf:
+            number_format = "0"
+
+        if not number_format:
+            continue
+        for row in range(header_row + 1, end_row + 1):
+            cell = ws.cell(row=row, column=col)
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = number_format
+
+
+def _add_color_scale(ws, header_row: int, max_col: int, end_row: int) -> None:
+    if end_row <= header_row + 1:
+        return
+    for col in range(1, max_col + 1):
+        header = str(ws.cell(row=header_row, column=col).value or "").casefold()
+        if not any(marker in header for marker in ["%", "tỷ lệ", "eff", "rating", "saved", "tiết kiệm"]):
+            continue
+        if not any(isinstance(ws.cell(row=row, column=col).value, (int, float)) for row in range(header_row + 1, end_row + 1)):
+            continue
+        col_letter = get_column_letter(col)
+        ws.conditional_formatting.add(
+            f"{col_letter}{header_row + 1}:{col_letter}{end_row}",
+            ColorScaleRule(
+                start_type="min",
+                start_color="F8696B",
+                mid_type="percentile",
+                mid_value=50,
+                mid_color="FFEB84",
+                end_type="max",
+                end_color="63BE7B",
+            ),
+        )
+
+
+def _shade_body_rows(ws, header_row: int, max_col: int, end_row: int) -> None:
+    if end_row <= header_row:
+        return
+    # Avoid overwriting semantically colored long-form analysis sheets.
+    if ws.title in {AI_COMPARE_SHEET, ERROR_DATA_SHEET}:
+        return
+    for row in range(header_row + 1, end_row + 1):
+        if str(ws.cell(row=row, column=1).value or "").upper().startswith("TỔNG"):
+            continue
+        if (row - header_row) % 2 == 0:
+            for col in range(1, max_col + 1):
+                cell = ws.cell(row=row, column=col)
+                if cell.fill.fill_type is None:
+                    cell.fill = PROFESSIONAL_ALT_FILL
+
+
+def _set_professional_filter(ws) -> None:
+    filter_sheet_names = {
+        "👤 Per Staff",
+        "🔧 Per Tool",
+        "📂 Per Category",
+        "📅 Time Trend",
+        "📝 Raw Log",
+        AI_COMPARE_SHEET,
+        ERROR_DATA_SHEET,
+        RATING_SHEET,
+    }
+    if ws.title == SDLC_SHEET:
+        for row in range(1, ws.max_row + 1):
+            if ws.cell(row=row, column=1).value == "All Task Details by SDLC Stage":
+                header_row = row + 1
+                end_row = _contiguous_table_end(ws, header_row, 4)
+                if end_row > header_row:
+                    ws.auto_filter.ref = f"A{header_row}:D{end_row}"
+                return
+    if ws.title not in filter_sheet_names:
+        return
+    header_rows = _iter_header_rows(ws)
+    if not header_rows:
+        return
+    header_row, max_col = header_rows[0]
+    end_row = _contiguous_table_end(ws, header_row, max_col)
+    if end_row > header_row:
+        ws.auto_filter.ref = f"A{header_row}:{get_column_letter(max_col)}{end_row}"
+
+
+def _polish_sheet(ws) -> None:
+    max_row = _last_used_row(ws)
+    max_col = _last_used_col(ws)
+    ws.sheet_view.showGridLines = False
+    ws.sheet_view.zoomScale = 90
+    ws.freeze_panes = ws.freeze_panes or ("A5" if max_row >= 5 else None)
+
+    if ws.cell(row=1, column=1).value:
+        ws.cell(row=1, column=1).font = PROFESSIONAL_TITLE_FONT
+        ws.row_dimensions[1].height = 24
+    if ws.cell(row=2, column=1).value:
+        ws.cell(row=2, column=1).font = PROFESSIONAL_SUBTITLE_FONT
+        ws.row_dimensions[2].height = 20
+
+    for row in ws.iter_rows(min_row=1, max_row=max_row, min_col=1, max_col=max_col):
+        for cell in row:
+            if cell.value in (None, ""):
+                continue
+            if not cell.font or not cell.font.bold:
+                cell.font = PROFESSIONAL_BODY_FONT
+            cell.alignment = CENTER if isinstance(cell.value, (int, float)) else LEFT
+
+    for header_row, header_width in _iter_header_rows(ws):
+        for cell in ws.iter_rows(min_row=header_row, max_row=header_row, min_col=1, max_col=header_width).__next__():
+            cell.fill = PROFESSIONAL_HEADER_FILL
+            cell.font = PROFESSIONAL_HEADER_FONT
+            cell.alignment = CENTER
+        end_row = _contiguous_table_end(ws, header_row, header_width)
+        _format_numeric_columns(ws, header_row, header_width, end_row)
+        _add_color_scale(ws, header_row, header_width, end_row)
+        _shade_body_rows(ws, header_row, header_width, end_row)
+
+    for row in range(1, max_row + 1):
+        cell = ws.cell(row=row, column=1)
+        if cell.value and len([v for v in _row_values(ws, row, max_col) if v]) == 1 and row not in {1, 2}:
+            cell.fill = PROFESSIONAL_SECTION_FILL
+            cell.font = Font(name="Aptos", bold=True, size=12, color=PROFESSIONAL_BLUE)
+
+    _set_professional_filter(ws)
+    ws.page_setup.orientation = "landscape" if max_col > 8 else "portrait"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+
+def polish_workbook(wb) -> None:
+    tab_colors = {
+        SDLC_SHEET: PROFESSIONAL_TEAL,
+        EFFICIENCY_SHEET: PROFESSIONAL_BLUE,
+        RATING_SHEET: PROFESSIONAL_ORANGE,
+        ERROR_CHART_SHEET: "C00000",
+        ERROR_DATA_SHEET: "C00000",
+        "📊 Tổng Quan": PROFESSIONAL_NAVY,
+        "👤 Per Staff": PROFESSIONAL_BLUE,
+        "🔧 Per Tool": "5B9BD5",
+        "📂 Per Category": "70AD47",
+        "📅 Time Trend": "8064A2",
+        "📝 Raw Log": "7F7F7F",
+        AI_COMPARE_SHEET: "FFC000",
+    }
+    for ws in wb.worksheets:
+        ws.sheet_properties.tabColor = tab_colors.get(ws.title, PROFESSIONAL_NAVY)
+        _polish_sheet(ws)
 
 
 def build_chart_workbook(wb, sessions: list[ReportSession]) -> None:
@@ -1189,6 +1526,7 @@ def build_chart_workbook(wb, sessions: list[ReportSession]) -> None:
 
     error_data_ws = wb[ERROR_DATA_SHEET]
     wb._sheets.append(wb._sheets.pop(wb._sheets.index(error_data_ws)))
+    polish_workbook(wb)
 
 
 # --------------------------------------------------------------------------- #
