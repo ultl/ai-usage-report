@@ -106,6 +106,7 @@ GENERATED_SHEETS = [
 LESSON_CACHE_PATH = Path(".ai_journal_cache.json")
 CHART_CACHE_PATH = Path(".ai_chart_cache.json")
 TRANSLATE_CACHE_PATH = Path(".ai_translate_cache.json")
+ESTIMATE_CACHE_PATH = Path(".ai_estimate_cache.json")
 PROMPT_VERSION = "chart-classifier-v1"
 MAX_ERROR_LABELS_FOR_CHART = 10
 MAX_LABELS_PER_SESSION = 3
@@ -372,6 +373,10 @@ class Session:
     time_saved: float | None = None
     user_lesson: str = ""
     tags: str = ""
+    # AI hour estimation fields
+    ai_est_hours: float | None = None
+    ai_actual_hours: float | None = None
+    ai_est_reason: str = ""
     # AI lesson inference fields
     ai_lesson: str = ""
     comparison: str = ""
@@ -649,6 +654,158 @@ def _parse_json_object(raw: str) -> dict[str, Any]:
         raise ValueError("Model response did not contain a JSON object")
     parsed = json.loads(match.group(0))
     return parsed
+
+
+# =========================================================================== #
+#  Section 4c — AI Hour Estimation
+# =========================================================================== #
+
+ESTIMATE_PROMPT = """<role>
+You are a senior engineering manager with 15+ years of experience estimating software tasks.
+You estimate how long tasks take WITH and WITHOUT AI assistance.
+</role>
+
+<staff_profile>
+{profile_json}
+</staff_profile>
+
+<task>
+For each task below, estimate:
+- `ai_est_hours`: how many hours this task would take the staff member WITHOUT any AI tools (manual work only), given their profile.
+- `ai_actual_hours`: how many hours this task would realistically take WITH AI assistance (the tool listed), given their profile.
+- `ai_est_reason`: one sentence explaining your reasoning (consider task complexity, staff experience, and AI tool capability).
+
+Base your estimates on the task description, category, tool used, and the staff member's experience level.
+Be realistic — a junior developer takes longer than a senior one. Complex tasks take more time.
+</task>
+
+<sessions>
+{sessions_json}
+</sessions>
+
+<output_format>
+Return ONLY a valid JSON object, no markdown:
+{{"results": [{{"id": 0, "ai_est_hours": 8.0, "ai_actual_hours": 3.0, "ai_est_reason": "..."}}, ...]}}
+
+IMPORTANT: Return ALL sessions. Use numeric values (float). Do not skip any.
+</output_format>"""
+
+
+def _load_profiles(path: Path | None) -> dict[str, dict[str, str]]:
+    """Load staff profiles from JSON file. Keys are staff names (case-insensitive match)."""
+    if path is None or not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            return {k: v for k, v in raw.items() if isinstance(v, dict)}
+    except Exception as e:
+        print(f"  ⚠  Failed to load profiles from {path}: {e}", file=sys.stderr)
+    return {}
+
+
+def _match_profile(staff: str, profiles: dict[str, dict[str, str]]) -> dict[str, str]:
+    """Case-insensitive profile lookup."""
+    for key, profile in profiles.items():
+        if key.strip().casefold() == staff.strip().casefold():
+            return profile
+    return {}
+
+
+def _estimate_hash(s: Session) -> str:
+    key = "|".join([s.staff, str(s.date), s.title, s.tool, s.category, s.task_desc])
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()
+
+
+def estimate_hours_batch(sessions: list[Session], model: str,
+                         profiles: dict[str, dict[str, str]],
+                         batch_size: int = 5) -> None:
+    """Use LLM to estimate EST and Actual hours from AI's perspective."""
+    cache = _load_json_cache(ESTIMATE_CACHE_PATH)
+    hashes: dict[int, str] = {}
+    misses: list[Session] = []
+    hits = 0
+
+    for s in sessions:
+        h = _estimate_hash(s)
+        hashes[id(s)] = h
+        if h in cache:
+            c = cache[h]
+            s.ai_est_hours = _to_float(c.get("ai_est_hours"))
+            s.ai_actual_hours = _to_float(c.get("ai_actual_hours"))
+            s.ai_est_reason = str(c.get("ai_est_reason") or "")
+            hits += 1
+        else:
+            misses.append(s)
+
+    total = len(sessions)
+    print(f"\n⏱️  AI hour estimation ({model}) — {total} sessions...")
+    print(f"   Cache hits: {hits}/{total}, estimating {len(misses)} session(s)...")
+
+    for start in range(0, len(misses), batch_size):
+        batch = misses[start:start + batch_size]
+        print(f"  • Batch {start // batch_size + 1}: {len(batch)} session(s)")
+
+        # Group by staff to include the right profile
+        staff_name = batch[0].staff
+        profile = _match_profile(staff_name, profiles)
+        profile_info = {
+            "name": staff_name,
+            **profile,
+        }
+        if not profile:
+            profile_info["note"] = "No profile provided — estimate based on task complexity alone."
+
+        items = []
+        for i, s in enumerate(batch):
+            items.append({
+                "id": i,
+                "title": _truncate(s.title, 200),
+                "tool": s.tool,
+                "category": s.category,
+                "task_desc": _truncate(s.task_desc, 500),
+                "user_est_hours": s.est_hours,
+                "user_actual_hours": s.actual_hours,
+            })
+
+        prompt = ESTIMATE_PROMPT.format(
+            profile_json=json.dumps(profile_info, ensure_ascii=False),
+            sessions_json=json.dumps(items, ensure_ascii=False))
+
+        try:
+            raw = _call_openai(model, prompt, timeout=300)
+            parsed = _parse_json_object(raw)
+
+            results: list[dict] = []
+            if isinstance(parsed, list):
+                results = parsed
+            elif isinstance(parsed, dict):
+                for key in ("results", "data", "sessions"):
+                    if key in parsed and isinstance(parsed[key], list):
+                        results = parsed[key]
+                        break
+                if not results and "id" in parsed:
+                    results = [parsed]
+
+            for item in results:
+                idx = item.get("id", -1)
+                if not (0 <= idx < len(batch)):
+                    continue
+                s = batch[idx]
+                h = hashes[id(s)]
+                s.ai_est_hours = _to_float(item.get("ai_est_hours"))
+                s.ai_actual_hours = _to_float(item.get("ai_actual_hours"))
+                s.ai_est_reason = str(item.get("ai_est_reason") or "").strip()
+                cache[h] = {
+                    "ai_est_hours": s.ai_est_hours,
+                    "ai_actual_hours": s.ai_actual_hours,
+                    "ai_est_reason": s.ai_est_reason,
+                }
+        except Exception as e:
+            print(f"  ⚠  Estimation batch failed: {e}", file=sys.stderr)
+
+    _save_json_cache(ESTIMATE_CACHE_PATH, cache)
+    print(f"✔  Estimation done. Cache: {ESTIMATE_CACHE_PATH}")
 
 
 # =========================================================================== #
@@ -1118,9 +1275,16 @@ def build_dashboard_sheet(wb: Workbook, sessions: list[Session]) -> None:
 
 def build_raw_log_sheet(wb: Workbook, sessions: list[Session]) -> None:
     ws = wb.create_sheet("📝 Raw Log")
+    has_ai_est = any(s.ai_est_hours is not None for s in sessions)
     headers = ["Staff", "Date", "Session Name", "Tool", "Category",
-               "Description", "Rating", "EST (h)", "Actual (h)", "Saved (h)",
-               "Savings %", "User Lesson", "Tags", "Source File"]
+               "Description", "Rating",
+               "User EST (h)", "User Actual (h)", "User Saved (h)", "User Savings %"]
+    widths = [14, 12, 32, 16, 16, 40, 8, 12, 12, 12, 11]
+    if has_ai_est:
+        headers += ["AI EST (h)", "AI Actual (h)", "AI Saved (h)", "AI Reason"]
+        widths += [12, 12, 12, 40]
+    headers += ["User Lesson", "Tags", "Source File"]
+    widths += [40, 24, 22]
     n_cols = len(headers)
     hr = _title_block(ws, "📝  RAW LOG  —  Consolidated Sessions",
                       f"{len(sessions)} rows", n_cols)
@@ -1131,23 +1295,24 @@ def build_raw_log_sheet(wb: Workbook, sessions: list[Session]) -> None:
     for i, s in enumerate(sessions):
         r = hr + 1 + i
         eff = f"{s.efficiency * 100:.0f}%" if s.efficiency is not None else "—"
-        ws.cell(row=r, column=1, value=s.staff)
-        ws.cell(row=r, column=2, value=_fmt_date(s.date))
-        ws.cell(row=r, column=3, value=s.title)
-        ws.cell(row=r, column=4, value=s.tool)
-        ws.cell(row=r, column=5, value=s.category)
-        ws.cell(row=r, column=6, value=s.task_desc)
-        ws.cell(row=r, column=7, value=s.rating)
-        ws.cell(row=r, column=8, value=s.est_hours)
-        ws.cell(row=r, column=9, value=s.actual_hours)
-        ws.cell(row=r, column=10, value=s.time_saved)
-        ws.cell(row=r, column=11, value=eff)
-        ws.cell(row=r, column=12, value=s.user_lesson)
-        ws.cell(row=r, column=13, value=s.tags)
-        ws.cell(row=r, column=14, value=s.source_file)
+        c = 1
+        for v in [s.staff, _fmt_date(s.date), s.title, s.tool, s.category,
+                  s.task_desc, s.rating, s.est_hours, s.actual_hours, s.time_saved, eff]:
+            ws.cell(row=r, column=c, value=v)
+            c += 1
+        if has_ai_est:
+            ai_saved = None
+            if s.ai_est_hours is not None and s.ai_actual_hours is not None:
+                ai_saved = round(s.ai_est_hours - s.ai_actual_hours, 1)
+            for v in [s.ai_est_hours, s.ai_actual_hours, ai_saved, s.ai_est_reason]:
+                ws.cell(row=r, column=c, value=v)
+                c += 1
+        for v in [s.user_lesson, s.tags, s.source_file]:
+            ws.cell(row=r, column=c, value=v)
+            c += 1
 
     _style_data_range(ws, hr + 1, hr + len(sessions), n_cols)
-    _set_widths(ws, [14, 12, 32, 16, 16, 40, 8, 10, 10, 12, 10, 40, 24, 22])
+    _set_widths(ws, widths)
     ws.freeze_panes = ws.cell(row=hr + 1, column=1)
 
 
@@ -2484,6 +2649,10 @@ def main() -> int:
                     help="Skip adding Excel chart sheets")
     ap.add_argument("--skip-pdf", action="store_true",
                     help="Skip PDF/PNG chart generation")
+    ap.add_argument("--profiles", type=Path, default=None,
+                    help="JSON file with staff profiles for AI hour estimation")
+    ap.add_argument("--no-estimate", action="store_true",
+                    help="Skip AI hour estimation")
     ap.add_argument("--batch-size", type=int, default=20,
                     help="Sessions per AI classification batch (default: 20)")
     ap.add_argument("--timeout", type=int, default=300,
@@ -2519,6 +2688,17 @@ def main() -> int:
         except Exception as e:
             print(f"⚠  Translation failed: {e}", file=sys.stderr)
             print("   Continuing with original language.", file=sys.stderr)
+
+    # ── Phase 0b: AI hour estimation ──
+    if not args.no_ai and not args.no_estimate:
+        profiles = _load_profiles(args.profiles)
+        if not profiles and args.profiles:
+            print(f"⚠  No profiles loaded from {args.profiles}", file=sys.stderr)
+        try:
+            estimate_hours_batch(all_sessions, args.model, profiles)
+        except Exception as e:
+            print(f"⚠  AI estimation failed: {e}", file=sys.stderr)
+            print("   Continuing without AI estimates.", file=sys.stderr)
 
     # ── Phase 1 AI: Lesson inference ──
     with_lesson_ai = not args.no_ai and not args.no_lesson_ai

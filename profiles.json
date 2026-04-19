@@ -1,0 +1,38 @@
+{
+  "Dngiang": {
+    "role": "Frontend Developer",
+    "experience": "2 years Java/Spring Boot",
+    "stack": "Java, Spring Boot, PostgreSQL, Docker",
+    "notes": ""
+  },
+  "Lnmai2": {
+    "role": "Business Analyst",
+    "experience": "2 years BA, requirements analysis",
+    "stack": "Confluence, Jira, Figma, Excel",
+    "notes": ""
+  },
+  "Ltluyen8": {
+    "role": "AI Engineer/ Project Assistant",
+    "experience": "2 years manual & automation testing",
+    "stack": "Selenium, JMeter, Postman",
+    "notes": ""
+  },
+  "Naduc11": {
+    "role": "Tech lead/ Backend Developer",
+    "experience": "3 years Node.js/TypeScript",
+    "stack": "Node.js, TypeScript, MongoDB, Redis",
+    "notes": ""
+  },
+  "Nvbinh3": {
+    "role": "Backend Developer",
+    "experience": "2 years React + Spring Boot",
+    "stack": "React, Java, Spring Boot, MySQL",
+    "notes": ""
+  },
+  "Tester": {
+    "role": "Tester",
+    "experience": "2 years testing",
+    "stack": "",
+    "notes": ""
+  }
+}

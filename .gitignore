@@ -2,6 +2,7 @@
 .ai_journal_cache.json
 .ai_chart_cache.json
 .ai_translate_cache.json
+.ai_estimate_cache.json
 out/*
 .env
 .omx/
