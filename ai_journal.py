@@ -170,6 +170,7 @@ GENERATED_PNG_NAMES = {
     "01_sdlc_tasks_by_stage.png", "02_staff_ai_effectiveness.png",
     "03_kpi_summary.png", "04_est_actual_tool.png", "05_est_actual_category.png",
     "06_rating_distribution.png", "07_top_errors.png", "08_error_heatmap.png",
+    "09_user_vs_ai_comparison.png",
     "01_kpi_summary.png", "02_est_actual_staff.png", "03_est_actual_tool.png",
     "04_est_actual_category.png", "05_rating_distribution.png",
     "06_top_errors.png", "07_error_heatmap.png", "08_sdlc_tasks_by_stage.png",
@@ -661,8 +662,8 @@ def _parse_json_object(raw: str) -> dict[str, Any]:
 # =========================================================================== #
 
 ESTIMATE_PROMPT = """<role>
-You are a senior engineering manager with 15+ years of experience estimating software tasks.
-You estimate how long tasks take WITH and WITHOUT AI assistance.
+You are a senior engineering manager with 15+ years of experience estimating software development tasks.
+You provide independent, objective hour estimates — your goal is to give a realistic benchmark so management can compare against the staff member's own self-reported estimates.
 </role>
 
 <staff_profile>
@@ -670,13 +671,19 @@ You estimate how long tasks take WITH and WITHOUT AI assistance.
 </staff_profile>
 
 <task>
-For each task below, estimate:
-- `ai_est_hours`: how many hours this task would take the staff member WITHOUT any AI tools (manual work only), given their profile.
-- `ai_actual_hours`: how many hours this task would realistically take WITH AI assistance (the tool listed), given their profile.
-- `ai_est_reason`: one sentence explaining your reasoning (consider task complexity, staff experience, and AI tool capability).
+For each task below, provide YOUR OWN independent estimate (do NOT look at the user's self-reported hours — they are intentionally hidden from you):
 
-Base your estimates on the task description, category, tool used, and the staff member's experience level.
-Be realistic — a junior developer takes longer than a senior one. Complex tasks take more time.
+- `ai_est_hours`: How many hours would this task realistically take the staff member described above if they did it MANUALLY without any AI tools? Factor in their role, experience level, and tech stack familiarity.
+- `ai_actual_hours`: How many hours would this task take WITH the AI tool listed? Factor in prompt iteration time, review time, and the tool's effectiveness for this type of task.
+- `ai_est_reason`: One sentence explaining your reasoning — mention the key factors (task complexity, staff experience, AI tool fit).
+
+Guidelines:
+- Be realistic, not optimistic. Junior devs take 2-3x longer than seniors on the same task.
+- Simple documentation tasks: 1-4h manual, 0.5-2h with AI.
+- Complex architecture/design: 4-16h manual, 2-8h with AI.
+- Bug fixes vary widely by complexity: 0.5-8h manual.
+- AI tools help most with boilerplate, docs, and well-defined tasks; less with novel architecture or debugging.
+- Round to nearest 0.5h.
 </task>
 
 <sessions>
@@ -764,8 +771,6 @@ def estimate_hours_batch(sessions: list[Session], model: str,
                 "tool": s.tool,
                 "category": s.category,
                 "task_desc": _truncate(s.task_desc, 500),
-                "user_est_hours": s.est_hours,
-                "user_actual_hours": s.actual_hours,
             })
 
         prompt = ESTIMATE_PROMPT.format(
@@ -976,11 +981,20 @@ def _agg(items: list[Session]) -> dict[str, Any]:
     avg_rating = sum(rated) / len(rated) if rated else 0
     excellent = sum(1 for s in items if s.rating == 5)
     avg_saved = saved / n if n else 0
+    # AI estimates
+    ai_est = sum(s.ai_est_hours or 0 for s in items)
+    ai_actual = sum(s.ai_actual_hours or 0 for s in items)
+    ai_saved = round(ai_est - ai_actual, 1) if ai_est else 0
+    ai_eff = (ai_saved / ai_est * 100) if ai_est else 0
+    has_ai = any(s.ai_est_hours is not None for s in items)
     return {
         "n": n, "est": round(est, 1), "actual": round(actual, 1),
         "saved": round(saved, 1), "eff": round(eff, 1),
         "avg_rating": round(avg_rating, 2), "excellent": excellent,
         "avg_saved": round(avg_saved, 1),
+        "ai_est": round(ai_est, 1), "ai_actual": round(ai_actual, 1),
+        "ai_saved": round(ai_saved, 1), "ai_eff": round(ai_eff, 1),
+        "has_ai": has_ai,
     }
 
 
@@ -1077,42 +1091,96 @@ def _write_total_row(ws, row: int, n_cols: int, hr: int, sum_cols: list[int],
 
 
 def build_dashboard_sheet(wb: Workbook, sessions: list[Session]) -> None:
-    """Combined Overview + Breakdown (Staff/Tool/Category) + Rating + Daily Trend on one sheet."""
+    """Combined Overview + Breakdown (Staff/Tool/Category) + Rating + Daily Trend on one sheet.
+    When AI estimates are available, the report leads with Assessed (AI) as the objective
+    baseline and shows Self-Reported (User) alongside it with deviation columns."""
     ws = wb.create_sheet("📊 Dashboard")
-    n_cols = 10
-    metric_headers = ["Sessions", "EST (h)", "Actual (h)", "Saved (h)",
-                      "Savings %", "Avg Saved/Session", "Avg Rating", "5★ Sessions"]
+    a = _agg(sessions)
+    has_ai = a["has_ai"]
+    n_cols = 16 if has_ai else 10
+
+    def _section(ws, r, text):
+        ws.cell(row=r, column=1, value=text).font = Font(
+            name="Arial", bold=True, size=12, color="1F4E78")
+        ws.merge_cells(start_row=r, end_row=r, start_column=1, end_column=n_cols)
+
+    gap_over = PatternFill("solid", start_color="FFC7CE")
+    gap_under = PatternFill("solid", start_color="C6EFCE")
 
     # ── KPI Overview ──
-    a = _agg(sessions)
     n_staff = len({s.staff for s in sessions})
     ws.cell(row=1, column=1,
-            value="📊  AI DEV JOURNAL  —  Consolidated Report").font = TITLE_FONT
+            value="📊  AI DEV JOURNAL  —  Objective Assessment Report").font = TITLE_FONT
     ws.merge_cells(start_row=1, end_row=1, start_column=1, end_column=n_cols)
-    ws.cell(row=2, column=1,
-            value=f"Generated {datetime.now().strftime('%d/%m/%Y %H:%M')}  •  "
-                  f"{n_staff} staff  •  {a['n']} sessions").font = SUBTITLE_FONT
+    subtitle = (f"Generated {datetime.now().strftime('%d/%m/%Y %H:%M')}  •  "
+                f"{n_staff} staff  •  {a['n']} sessions")
+    if has_ai:
+        subtitle += "  •  Assessed = AI objective estimate  •  Self-Reported = user input"
+    ws.cell(row=2, column=1, value=subtitle).font = SUBTITLE_FONT
     ws.merge_cells(start_row=2, end_row=2, start_column=1, end_column=n_cols)
     ws.row_dimensions[1].height = 22
 
-    kpi_hr = 4
-    kpi_headers = ["Metric", "Value", "", "Top 5 AI Tools", "Sessions", "Hours Saved", "Savings %"]
-    for i, h in enumerate(kpi_headers, 1):
-        ws.cell(row=kpi_hr, column=i, value=h)
-    _style_header(ws, kpi_hr, 7)
+    calc_desc = (
+        "EST = Estimated hours without AI  •  Actual = Hours spent with AI  •  "
+        "Saved = EST − Actual  •  Savings % = Saved / EST × 100  •  "
+        "Δ = Self-Reported − Assessed  •  "
+        "Accuracy = Self-Rep Saved / Assessed Saved × 100"
+    ) if has_ai else (
+        "EST = Estimated hours without AI  •  Actual = Hours spent with AI  •  "
+        "Saved = EST − Actual  •  Savings % = Saved / EST × 100"
+    )
+    ws.cell(row=3, column=1, value=calc_desc).font = Font(
+        name="Arial", italic=True, size=9, color="808080")
+    ws.merge_cells(start_row=3, end_row=3, start_column=1, end_column=n_cols)
 
-    kpis = [
-        ("Total Sessions", a["n"]), ("Staff Count", n_staff),
-        ("Total EST (No AI)", f"{a['est']}h"), ("Total Actual (With AI)", f"{a['actual']}h"),
-        ("Total Hours Saved", f"{a['saved']}h"),
-        ("Time Savings %", f"{a['eff']}%"),
-        ("Avg Saved/Session", f"{a['avg_saved']}h"),
-        ("Avg Quality Rating", f"{a['avg_rating']} / 5"),
-        ("Excellent Sessions (5★)", a["excellent"]),
-    ]
-    for i, (k, v) in enumerate(kpis):
-        ws.cell(row=kpi_hr + 1 + i, column=1, value=k).font = CELL_FONT
-        ws.cell(row=kpi_hr + 1 + i, column=2, value=v).font = NUMBER_FONT
+    kpi_hr = 5
+    if has_ai:
+        kpi_headers = ["Metric", "Assessed (AI)", "Self-Reported", "Deviation",
+                       "", "Top 5 AI Tools", "Sessions", "Hours Saved", "Savings %"]
+        kpi_n = len(kpi_headers)
+        for i, h in enumerate(kpi_headers, 1):
+            ws.cell(row=kpi_hr, column=i, value=h)
+        _style_header(ws, kpi_hr, kpi_n)
+
+        d_est = round(a["est"] - a["ai_est"], 1)
+        d_act = round(a["actual"] - a["ai_actual"], 1)
+        d_sav = round(a["saved"] - a["ai_saved"], 1)
+        d_eff = round(a["eff"] - a["ai_eff"], 1)
+        kpis: list[tuple[str, Any, Any, Any]] = [
+            ("Total Sessions",          a["n"],             a["n"],             ""),
+            ("Staff Count",             n_staff,            n_staff,            ""),
+            ("EST (No AI)",             f"{a['ai_est']}h",  f"{a['est']}h",    f"{d_est:+.1f}h"),
+            ("Actual (With AI)",        f"{a['ai_actual']}h", f"{a['actual']}h", f"{d_act:+.1f}h"),
+            ("Hours Saved",             f"{a['ai_saved']}h", f"{a['saved']}h",  f"{d_sav:+.1f}h"),
+            ("Savings %",              f"{a['ai_eff']}%",   f"{a['eff']}%",    f"{d_eff:+.1f}%"),
+            ("Avg Saved/Session",       f"{a['avg_saved']}h", "",              ""),
+            ("Avg Quality Rating",      f"{a['avg_rating']} / 5", "",          ""),
+            ("Excellent Sessions (5★)", a["excellent"],     "",                ""),
+        ]
+        for i, (k, assessed, self_rep, dev) in enumerate(kpis):
+            ws.cell(row=kpi_hr + 1 + i, column=1, value=k).font = CELL_FONT
+            ws.cell(row=kpi_hr + 1 + i, column=2, value=assessed).font = NUMBER_FONT
+            ws.cell(row=kpi_hr + 1 + i, column=3, value=self_rep).font = CELL_FONT
+            ws.cell(row=kpi_hr + 1 + i, column=4, value=dev).font = CELL_FONT
+        tool_col_start = 6
+    else:
+        kpi_headers_simple = ["Metric", "Value", "", "Top 5 AI Tools", "Sessions", "Hours Saved", "Savings %"]
+        kpi_n = len(kpi_headers_simple)
+        for i, h in enumerate(kpi_headers_simple, 1):
+            ws.cell(row=kpi_hr, column=i, value=h)
+        _style_header(ws, kpi_hr, kpi_n)
+        kpis_s = [
+            ("Total Sessions", a["n"]), ("Staff Count", n_staff),
+            ("Total EST (No AI)", f"{a['est']}h"), ("Total Actual (With AI)", f"{a['actual']}h"),
+            ("Total Hours Saved", f"{a['saved']}h"), ("Time Savings %", f"{a['eff']}%"),
+            ("Avg Saved/Session", f"{a['avg_saved']}h"),
+            ("Avg Quality Rating", f"{a['avg_rating']} / 5"),
+            ("Excellent Sessions (5★)", a["excellent"]),
+        ]
+        for i, (k, v) in enumerate(kpis_s):
+            ws.cell(row=kpi_hr + 1 + i, column=1, value=k).font = CELL_FONT
+            ws.cell(row=kpi_hr + 1 + i, column=2, value=v).font = NUMBER_FONT
+        tool_col_start = 4
 
     tool_data: dict[str, dict] = {}
     for s in sessions:
@@ -1124,105 +1192,144 @@ def build_dashboard_sheet(wb: Workbook, sessions: list[Session]) -> None:
     top_tools = sorted(tool_data.items(), key=lambda x: -x[1]["saved"])[:5]
     for i, (t, d) in enumerate(top_tools):
         eff = (d["saved"] / d["est"] * 100) if d["est"] else 0
-        ws.cell(row=kpi_hr + 1 + i, column=4, value=t).font = CELL_FONT
-        ws.cell(row=kpi_hr + 1 + i, column=5, value=d["n"]).font = NUMBER_FONT
-        ws.cell(row=kpi_hr + 1 + i, column=6, value=round(d["saved"], 1)).font = NUMBER_FONT
-        ws.cell(row=kpi_hr + 1 + i, column=7, value=f"{eff:.0f}%").font = NUMBER_FONT
+        ws.cell(row=kpi_hr + 1 + i, column=tool_col_start, value=t).font = CELL_FONT
+        ws.cell(row=kpi_hr + 1 + i, column=tool_col_start + 1, value=d["n"]).font = NUMBER_FONT
+        ws.cell(row=kpi_hr + 1 + i, column=tool_col_start + 2, value=round(d["saved"], 1)).font = NUMBER_FONT
+        ws.cell(row=kpi_hr + 1 + i, column=tool_col_start + 3, value=f"{eff:.0f}%").font = NUMBER_FONT
 
-    last_kpi = kpi_hr + max(len(kpis), len(top_tools))
-    _style_data_range(ws, kpi_hr + 1, last_kpi, 7)
+    last_kpi = kpi_hr + 9
+    _style_data_range(ws, kpi_hr + 1, last_kpi, kpi_n)
     cursor = last_kpi + 2
 
+    # ── Self-Report Accuracy per Staff ──
+    if has_ai:
+        _section(ws, cursor, "SELF-REPORT ACCURACY  —  Deviation from AI Objective Estimate (Δ = Self-Reported − Assessed)")
+        cursor += 1
+        cmp_headers = [
+            "Staff",
+            "Assessed EST", "Self-Reported EST", "Δ EST",
+            "Assessed Actual", "Self-Reported Actual", "Δ Actual",
+            "Assessed Saved", "Self-Reported Saved", "Δ Saved",
+            "Assessed %", "Self-Reported %", "Δ %",
+            "Accuracy",
+        ]
+        for i, h in enumerate(cmp_headers, 1):
+            ws.cell(row=cursor, column=i, value=h)
+        _style_header(ws, cursor, len(cmp_headers))
+
+        by_staff_cmp: dict[str, list[Session]] = {}
+        for s in sessions:
+            by_staff_cmp.setdefault(s.staff, []).append(s)
+        cmp_rows = []
+        for staff in sorted(by_staff_cmp, key=lambda k: -sum(s.time_saved or 0 for s in by_staff_cmp[k])):
+            sa = _agg(by_staff_cmp[staff])
+            de = round(sa["est"] - sa["ai_est"], 1)
+            da = round(sa["actual"] - sa["ai_actual"], 1)
+            ds = round(sa["saved"] - sa["ai_saved"], 1)
+            dp = round(sa["eff"] - sa["ai_eff"], 1)
+            # Accuracy: how close self-reported saved is to assessed saved (%)
+            acc = f"{sa['saved'] / sa['ai_saved'] * 100:.0f}%" if sa["ai_saved"] else "—"
+            cmp_rows.append((
+                staff,
+                sa["ai_est"], sa["est"], de,
+                sa["ai_actual"], sa["actual"], da,
+                sa["ai_saved"], sa["saved"], ds,
+                sa["ai_eff"], sa["eff"], dp,
+                acc,
+            ))
+        for i, row in enumerate(cmp_rows):
+            for j, v in enumerate(row, 1):
+                cell = ws.cell(row=cursor + 1 + i, column=j, value=v)
+                if j in (4, 7, 10, 13) and isinstance(v, (int, float)):
+                    cell.fill = gap_over if v > 0.5 else gap_under if v < -0.5 else PatternFill()
+        _style_data_range(ws, cursor + 1, cursor + len(cmp_rows), len(cmp_headers))
+        cursor = cursor + len(cmp_rows) + 2
+
+    # ── Breakdown helper ──
+    # When AI available: Assessed first, Self-Reported second, then deltas
+    if has_ai:
+        bd_headers_base = ["Sessions",
+                           "Assessed EST", "Assessed Actual", "Assessed Saved", "Assessed %",
+                           "Self-Rep EST", "Self-Rep Actual", "Self-Rep Saved", "Self-Rep %",
+                           "Δ Saved", "Avg Rating", "5★"]
+    else:
+        bd_headers_base = ["Sessions", "EST (h)", "Actual (h)", "Saved (h)",
+                           "Savings %", "Avg Saved/Session", "Avg Rating", "5★ Sessions"]
+
+    def _write_breakdown(label_col_name: str, grouped: dict[str, list[Session]],
+                         extra_cols: list[str] | None = None) -> int:
+        nonlocal cursor
+        headers = [label_col_name] + bd_headers_base
+        if extra_cols:
+            headers += extra_cols
+        ncols = len(headers)
+        for i, h in enumerate(headers, 1):
+            ws.cell(row=cursor, column=i, value=h)
+        _style_header(ws, cursor, ncols)
+
+        rows_data = []
+        for key in sorted(grouped, key=lambda k: -sum(s.time_saved or 0 for s in grouped[k])):
+            items = grouped[key]
+            ga = _agg(items)
+            if has_ai:
+                ds = round(ga["saved"] - ga["ai_saved"], 1)
+                row: list[Any] = [key, ga["n"],
+                                  ga["ai_est"], ga["ai_actual"], ga["ai_saved"], ga["ai_eff"],
+                                  ga["est"], ga["actual"], ga["saved"], ga["eff"],
+                                  ds, ga["avg_rating"], ga["excellent"]]
+            else:
+                row = [key, ga["n"], ga["est"], ga["actual"], ga["saved"],
+                       ga["eff"], ga["avg_saved"], ga["avg_rating"], ga["excellent"]]
+            if extra_cols:
+                tools: dict[str, int] = {}
+                for s in items:
+                    if s.tool:
+                        tools[s.tool] = tools.get(s.tool, 0) + 1
+                row.append(max(tools.items(), key=lambda x: x[1])[0] if tools else "—")
+            rows_data.append(row)
+
+        for i, row in enumerate(rows_data):
+            for j, v in enumerate(row, 1):
+                cell = ws.cell(row=cursor + 1 + i, column=j, value=v)
+                # Color Δ Saved column
+                if has_ai and j == 11 and isinstance(v, (int, float)):
+                    cell.fill = gap_over if v > 0.5 else gap_under if v < -0.5 else PatternFill()
+
+        total_r = cursor + 1 + len(rows_data)
+        if has_ai:
+            _write_total_row(ws, total_r, ncols, cursor,
+                             sum_cols=[2, 3, 4, 5, 7, 8, 9, 11, 13],
+                             avg_cols=[6, 10, 12])
+        else:
+            _write_total_row(ws, total_r, ncols, cursor,
+                             sum_cols=[2, 3, 4, 5, 9], avg_cols=[6, 7, 8])
+        _style_data_range(ws, cursor + 1, total_r, ncols)
+        cursor = total_r + 2
+        return cursor
+
     # ── By Staff ──
-    _section = lambda ws, r, text: (
-        ws.cell(row=r, column=1).__setattr__("value", text),
-        setattr(ws.cell(row=r, column=1), "font",
-                Font(name="Arial", bold=True, size=12, color="1F4E78")),
-        ws.merge_cells(start_row=r, end_row=r, start_column=1, end_column=n_cols),
-    )
     _section(ws, cursor, "BY STAFF")
     cursor += 1
-    staff_headers = ["Staff"] + metric_headers + ["Primary Tool"]
-    for i, h in enumerate(staff_headers, 1):
-        ws.cell(row=cursor, column=i, value=h)
-    _style_header(ws, cursor, len(staff_headers))
-
     by_staff: dict[str, list[Session]] = {}
     for s in sessions:
         by_staff.setdefault(s.staff, []).append(s)
-    staff_rows = []
-    for staff, items in by_staff.items():
-        sa = _agg(items)
-        tools: dict[str, int] = {}
-        for s in items:
-            if s.tool:
-                tools[s.tool] = tools.get(s.tool, 0) + 1
-        main_tool = max(tools.items(), key=lambda x: x[1])[0] if tools else "—"
-        staff_rows.append((staff, sa["n"], sa["est"], sa["actual"], sa["saved"],
-                           sa["eff"], sa["avg_saved"], sa["avg_rating"], sa["excellent"], main_tool))
-    staff_rows.sort(key=lambda r: -r[4])
-    for i, row in enumerate(staff_rows):
-        for j, v in enumerate(row, 1):
-            ws.cell(row=cursor + 1 + i, column=j, value=v)
-    total_r = cursor + 1 + len(staff_rows)
-    _write_total_row(ws, total_r, len(staff_headers), cursor,
-                     sum_cols=[2, 3, 4, 5, 9], avg_cols=[6, 7, 8])
-    _style_data_range(ws, cursor + 1, total_r, len(staff_headers))
-    cursor = total_r + 2
+    _write_breakdown("Staff", by_staff, extra_cols=["Primary Tool"])
 
     # ── By Tool ──
-    tool_headers = ["AI Tool"] + metric_headers
-    n_tool = len(tool_headers)
     _section(ws, cursor, "BY AI TOOL")
     cursor += 1
-    for i, h in enumerate(tool_headers, 1):
-        ws.cell(row=cursor, column=i, value=h)
-    _style_header(ws, cursor, n_tool)
-
     by_tool: dict[str, list[Session]] = {}
     for s in sessions:
         by_tool.setdefault(s.tool or "(unknown)", []).append(s)
-    tool_rows = []
-    for tool, items in by_tool.items():
-        ta = _agg(items)
-        tool_rows.append((tool, ta["n"], ta["est"], ta["actual"], ta["saved"],
-                          ta["eff"], ta["avg_saved"], ta["avg_rating"], ta["excellent"]))
-    tool_rows.sort(key=lambda r: -r[4])
-    for i, row in enumerate(tool_rows):
-        for j, v in enumerate(row, 1):
-            ws.cell(row=cursor + 1 + i, column=j, value=v)
-    total_r = cursor + 1 + len(tool_rows)
-    _write_total_row(ws, total_r, n_tool, cursor,
-                     sum_cols=[2, 3, 4, 5, 9], avg_cols=[6, 7, 8])
-    _style_data_range(ws, cursor + 1, total_r, n_tool)
-    cursor = total_r + 2
+    _write_breakdown("AI Tool", by_tool)
 
     # ── By Category ──
-    cat_headers = ["Category"] + metric_headers
-    n_cat = len(cat_headers)
     _section(ws, cursor, "BY CATEGORY")
     cursor += 1
-    for i, h in enumerate(cat_headers, 1):
-        ws.cell(row=cursor, column=i, value=h)
-    _style_header(ws, cursor, n_cat)
-
     by_cat: dict[str, list[Session]] = {}
     for s in sessions:
         by_cat.setdefault(s.category or "(uncategorized)", []).append(s)
-    cat_rows = []
-    for cat, items in by_cat.items():
-        ca = _agg(items)
-        cat_rows.append((cat, ca["n"], ca["est"], ca["actual"], ca["saved"],
-                         ca["eff"], ca["avg_saved"], ca["avg_rating"], ca["excellent"]))
-    cat_rows.sort(key=lambda r: -r[4])
-    for i, row in enumerate(cat_rows):
-        for j, v in enumerate(row, 1):
-            ws.cell(row=cursor + 1 + i, column=j, value=v)
-    total_r = cursor + 1 + len(cat_rows)
-    _write_total_row(ws, total_r, n_cat, cursor,
-                     sum_cols=[2, 3, 4, 5, 9], avg_cols=[6, 7, 8])
-    _style_data_range(ws, cursor + 1, total_r, n_cat)
-    cursor = total_r + 2
+    _write_breakdown("Category", by_cat)
 
     # ── Rating Distribution ──
     _section(ws, cursor, "RATING DISTRIBUTION BY TOOL")
@@ -1270,41 +1377,76 @@ def build_dashboard_sheet(wb: Workbook, sessions: list[Session]) -> None:
         ws.cell(row=cursor + 1 + i, column=7, value=da["avg_rating"])
     _style_data_range(ws, cursor + 1, cursor + len(sorted_days), n_trend)
 
-    _set_widths(ws, [28, 10, 12, 12, 14, 12, 16, 10, 10, 24])
+    _set_widths(ws, [28, 12, 12, 12, 12, 12, 12, 12, 12, 10, 10, 10, 10, 10, 24, 24])
 
 
 def build_raw_log_sheet(wb: Workbook, sessions: list[Session]) -> None:
     ws = wb.create_sheet("📝 Raw Log")
     has_ai_est = any(s.ai_est_hours is not None for s in sessions)
     headers = ["Staff", "Date", "Session Name", "Tool", "Category",
-               "Description", "Rating",
-               "User EST (h)", "User Actual (h)", "User Saved (h)", "User Savings %"]
-    widths = [14, 12, 32, 16, 16, 40, 8, 12, 12, 12, 11]
+               "Description", "Rating"]
+    widths = [14, 12, 32, 16, 16, 40, 8]
     if has_ai_est:
-        headers += ["AI EST (h)", "AI Actual (h)", "AI Saved (h)", "AI Reason"]
-        widths += [12, 12, 12, 40]
+        headers += ["Assessed EST", "Assessed Actual", "Assessed Saved", "Assessed %",
+                    "Self-Rep EST", "Self-Rep Actual", "Self-Rep Saved", "Self-Rep %",
+                    "Δ EST", "Δ Actual", "Δ Saved", "AI Reason"]
+        widths += [12, 12, 12, 10, 12, 12, 12, 10, 10, 10, 10, 40]
+    else:
+        headers += ["EST (h)", "Actual (h)", "Saved (h)", "Savings %"]
+        widths += [12, 12, 12, 10]
     headers += ["User Lesson", "Tags", "Source File"]
     widths += [40, 24, 22]
     n_cols = len(headers)
+    raw_subtitle = f"{len(sessions)} rows"
+    if has_ai_est:
+        raw_subtitle += ("  •  Assessed = AI blind estimate based on staff profile  •  "
+                         "Self-Rep = user input  •  Δ = Self-Rep − Assessed  •  "
+                         "Saved = EST − Actual  •  % = Saved / EST × 100")
     hr = _title_block(ws, "📝  RAW LOG  —  Consolidated Sessions",
-                      f"{len(sessions)} rows", n_cols)
+                      raw_subtitle, n_cols)
     for i, h in enumerate(headers, 1):
         ws.cell(row=hr, column=i, value=h)
     _style_header(ws, hr, n_cols)
 
+    gap_over = PatternFill("solid", start_color="FFC7CE")   # red — user over-reports
+    gap_under = PatternFill("solid", start_color="C6EFCE")  # green — user under-reports
+
     for i, s in enumerate(sessions):
         r = hr + 1 + i
-        eff = f"{s.efficiency * 100:.0f}%" if s.efficiency is not None else "—"
         c = 1
         for v in [s.staff, _fmt_date(s.date), s.title, s.tool, s.category,
-                  s.task_desc, s.rating, s.est_hours, s.actual_hours, s.time_saved, eff]:
+                  s.task_desc, s.rating]:
             ws.cell(row=r, column=c, value=v)
             c += 1
         if has_ai_est:
             ai_saved = None
+            ai_eff = "—"
             if s.ai_est_hours is not None and s.ai_actual_hours is not None:
                 ai_saved = round(s.ai_est_hours - s.ai_actual_hours, 1)
-            for v in [s.ai_est_hours, s.ai_actual_hours, ai_saved, s.ai_est_reason]:
+                ai_eff = f"{ai_saved / s.ai_est_hours * 100:.0f}%" if s.ai_est_hours else "—"
+            user_eff = f"{s.efficiency * 100:.0f}%" if s.efficiency is not None else "—"
+            # Assessed (AI) first
+            for v in [s.ai_est_hours, s.ai_actual_hours, ai_saved, ai_eff]:
+                ws.cell(row=r, column=c, value=v)
+                c += 1
+            # Self-Reported (User) second
+            for v in [s.est_hours, s.actual_hours, s.time_saved, user_eff]:
+                ws.cell(row=r, column=c, value=v)
+                c += 1
+            # Deltas (Self-Reported − Assessed)
+            d_est = round(s.est_hours - s.ai_est_hours, 1) if s.est_hours is not None and s.ai_est_hours is not None else None
+            d_act = round(s.actual_hours - s.ai_actual_hours, 1) if s.actual_hours is not None and s.ai_actual_hours is not None else None
+            d_sav = round(s.time_saved - ai_saved, 1) if s.time_saved is not None and ai_saved is not None else None
+            for delta in [d_est, d_act, d_sav]:
+                cell = ws.cell(row=r, column=c, value=delta)
+                if isinstance(delta, (int, float)):
+                    cell.fill = gap_over if delta > 0.5 else gap_under if delta < -0.5 else PatternFill()
+                c += 1
+            ws.cell(row=r, column=c, value=s.ai_est_reason)
+            c += 1
+        else:
+            user_eff = f"{s.efficiency * 100:.0f}%" if s.efficiency is not None else "—"
+            for v in [s.est_hours, s.actual_hours, s.time_saved, user_eff]:
                 ws.cell(row=r, column=c, value=v)
                 c += 1
         for v in [s.user_lesson, s.tags, s.source_file]:
@@ -1318,15 +1460,25 @@ def build_raw_log_sheet(wb: Workbook, sessions: list[Session]) -> None:
 
 def build_ai_comparison_sheet(wb: Workbook, sessions: list[Session]) -> None:
     ws = wb.create_sheet("🤖 AI Lesson Compare")
+    has_ai_est = any(s.ai_est_hours is not None for s in sessions)
     headers = ["Staff", "Date", "Session Name", "Tool",
                "Task Description", "Main Prompt", "Result",
                "User Lesson", "AI Inferred Lesson", "Comparison",
-               "User ★", "AI ★", "Δ (AI − User)", "AI Rating Reason",
-               "Suggested Prompt"]
+               "User ★", "AI ★", "Δ Rating"]
+    if has_ai_est:
+        headers += ["Assessed EST", "Self-Rep EST", "Δ EST",
+                    "Assessed Actual", "Self-Rep Actual", "Δ Actual",
+                    "Assessed Saved", "Self-Rep Saved", "Δ Saved"]
+    headers += ["AI Rating Reason", "Suggested Prompt"]
     n_cols = len(headers)
+    cmp_subtitle = ("AI infers lesson, rates output (1–5), and suggests an improved prompt  •  "
+                    "Δ Rating = AI ★ − User ★")
+    if has_ai_est:
+        cmp_subtitle += ("  •  Assessed = AI blind estimate  •  Self-Rep = user input  •  "
+                         "Δ = Self-Rep − Assessed  •  Saved = EST − Actual")
     hr = _title_block(ws,
                       "🤖  LESSON COMPARISON & PROMPT SUGGESTIONS  —  AI vs User",
-                      "AI infers lesson, rates output (1–5), and suggests an improved prompt",
+                      cmp_subtitle,
                       n_cols)
     for i, h in enumerate(headers, 1):
         ws.cell(row=hr, column=i, value=h)
@@ -1344,43 +1496,63 @@ def build_ai_comparison_sheet(wb: Workbook, sessions: list[Session]) -> None:
 
     for i, s in enumerate(sessions):
         r = hr + 1 + i
-        ws.cell(row=r, column=1, value=s.staff)
-        ws.cell(row=r, column=2, value=_fmt_date(s.date))
-        ws.cell(row=r, column=3, value=s.title)
-        ws.cell(row=r, column=4, value=s.tool)
-        ws.cell(row=r, column=5, value=s.task_desc or "—")
-        ws.cell(row=r, column=6, value=s.prompt or "—")
-        ws.cell(row=r, column=7, value=s.result or "—")
-        ws.cell(row=r, column=8, value=s.user_lesson or "(empty)")
-        ws.cell(row=r, column=9, value=s.ai_lesson or "—")
-        comp_cell = ws.cell(row=r, column=10, value=s.comparison or "—")
+        c = 1
+        for v in [s.staff, _fmt_date(s.date), s.title, s.tool,
+                  s.task_desc or "—", s.prompt or "—", s.result or "—",
+                  s.user_lesson or "(empty)", s.ai_lesson or "—"]:
+            ws.cell(row=r, column=c, value=v)
+            c += 1
+
+        comp_cell = ws.cell(row=r, column=c, value=s.comparison or "—")
         if s.comparison in comparison_fills:
             comp_cell.fill = comparison_fills[s.comparison]
             comp_cell.alignment = CENTER
+        c += 1
 
-        user_cell = ws.cell(row=r, column=11, value=s.rating)
-        ai_cell = ws.cell(row=r, column=12, value=s.ai_rating)
-        user_cell.alignment = CENTER
-        ai_cell.alignment = CENTER
+        ws.cell(row=r, column=c, value=s.rating).alignment = CENTER
+        c += 1
+        ws.cell(row=r, column=c, value=s.ai_rating).alignment = CENTER
+        c += 1
 
         gap = None
         if s.rating is not None and s.ai_rating is not None:
             gap = round(s.ai_rating - s.rating, 1)
-        gap_cell = ws.cell(row=r, column=13, value=gap)
+        gap_cell = ws.cell(row=r, column=c, value=gap)
         gap_cell.alignment = CENTER
         if gap is not None:
-            if gap >= 1:
-                gap_cell.fill = gap_green
-            elif gap <= -1:
-                gap_cell.fill = gap_red
+            gap_cell.fill = gap_green if gap >= 1 else gap_red if gap <= -1 else PatternFill()
+        c += 1
 
-        ws.cell(row=r, column=14, value=s.ai_rating_reason or "—")
-        sug_cell = ws.cell(row=r, column=15, value=s.suggested_prompt or "—")
+        if has_ai_est:
+            ai_saved = None
+            if s.ai_est_hours is not None and s.ai_actual_hours is not None:
+                ai_saved = round(s.ai_est_hours - s.ai_actual_hours, 1)
+            # Assessed first, Self-Reported second, delta = Self-Rep − Assessed
+            for ai, u in [(s.ai_est_hours, s.est_hours),
+                          (s.ai_actual_hours, s.actual_hours),
+                          (ai_saved, s.time_saved)]:
+                ws.cell(row=r, column=c, value=ai)
+                c += 1
+                ws.cell(row=r, column=c, value=u)
+                c += 1
+                delta = round(u - ai, 1) if u is not None and ai is not None else None
+                d_cell = ws.cell(row=r, column=c, value=delta)
+                if isinstance(delta, (int, float)):
+                    d_cell.fill = gap_red if delta > 0.5 else gap_green if delta < -0.5 else PatternFill()
+                c += 1
+
+        ws.cell(row=r, column=c, value=s.ai_rating_reason or "—")
+        c += 1
+        sug_cell = ws.cell(row=r, column=c, value=s.suggested_prompt or "—")
         if s.suggested_prompt:
             sug_cell.fill = suggested_fill
 
     _style_data_range(ws, hr + 1, hr + len(sessions), n_cols)
-    _set_widths(ws, [14, 12, 26, 14, 36, 36, 36, 34, 38, 14, 8, 8, 12, 32, 65])
+    widths = [14, 12, 26, 14, 36, 36, 36, 34, 38, 14, 8, 8, 10]
+    if has_ai_est:
+        widths += [10, 10, 10, 10, 10, 10, 10, 10, 10]
+    widths += [32, 65]
+    _set_widths(ws, widths)
     ws.freeze_panes = ws.cell(row=hr + 1, column=5)
     for r in range(hr + 1, hr + 1 + len(sessions)):
         ws.row_dimensions[r].height = 150
@@ -1740,28 +1912,8 @@ def sdlc_staff_matrix(sessions: list[Session]) -> tuple[list[str], list[list[Any
     return staff_list, rows
 
 
-def sdlc_task_chart_matrix(sessions: list[Session]) -> tuple[list[str], list[list[Any]]]:
-    task_counts_by_stage: dict[str, Counter[str]] = {cat: Counter() for cat in SDLC_TAXONOMY}
-    for cat in SDLC_TAXONOMY:
-        stage_sessions = [s for s in sessions
-                          if (s.sdlc_category if s.sdlc_category in SDLC_TAXONOMY else "Other") == cat]
-        stage_sessions.sort(key=lambda s: (s.title.casefold(), s.staff.casefold(), str(s.date)))
-        task_counts_by_stage[cat].update(
-            s.title or s.task_desc or "(unnamed task)" for s in stage_sessions)
 
-    task_names: list[str] = []
-    seen: set[str] = set()
-    for cat in SDLC_TAXONOMY:
-        for tn in task_counts_by_stage[cat]:
-            if tn not in seen:
-                seen.add(tn)
-                task_names.append(tn)
-
-    rows = [[cat, *[task_counts_by_stage[cat][tn] for tn in task_names]] for cat in SDLC_TAXONOMY]
-    return task_names, rows
-
-
-def sdlc_task_detail_rows(sessions: list[Session]) -> list[list[Any]]:
+def sdlc_task_detail_rows(sessions: list[Session], has_ai: bool) -> list[list[Any]]:
     rows: list[list[Any]] = []
     for cat in SDLC_TAXONOMY:
         stage_sessions = [s for s in sessions
@@ -1769,10 +1921,19 @@ def sdlc_task_detail_rows(sessions: list[Session]) -> list[list[Any]]:
         stage_sessions.sort(key=lambda s: (s.title.casefold(), s.staff.casefold(), str(s.date)))
         for s in stage_sessions:
             saved = s.saved_hours
-            efficiency = round(saved / s.est_hours * 100, 2) if saved is not None and s.est_hours else 0
-            rows.append([cat, s.title or s.task_desc or "(unnamed task)",
-                         s.staff, _fmt_date(s.date),
-                         s.est_hours or 0, s.actual_hours or 0, saved or 0, efficiency])
+            base = [cat, s.title or s.task_desc or "(unnamed task)",
+                    s.staff, _fmt_date(s.date)]
+            if has_ai:
+                ai_saved = round(s.ai_est_hours - s.ai_actual_hours, 1) if s.ai_est_hours and s.ai_actual_hours else 0
+                ai_eff = round(ai_saved / s.ai_est_hours * 100, 2) if s.ai_est_hours else 0
+                u_eff = round(saved / s.est_hours * 100, 2) if saved is not None and s.est_hours else 0
+                d_sav = round((saved or 0) - ai_saved, 1)
+                base += [s.ai_est_hours or 0, s.ai_actual_hours or 0, ai_saved, ai_eff,
+                         s.est_hours or 0, s.actual_hours or 0, saved or 0, u_eff, d_sav]
+            else:
+                efficiency = round(saved / s.est_hours * 100, 2) if saved is not None and s.est_hours else 0
+                base += [s.est_hours or 0, s.actual_hours or 0, saved or 0, efficiency]
+            rows.append(base)
     return rows
 
 
@@ -1800,7 +1961,9 @@ def build_error_data_sheet(wb, sessions: list[Session]) -> None:
 def build_error_chart_sheet(wb, sessions: list[Session]) -> None:
     ws = wb.create_sheet(ERROR_CHART_SHEET)
     row = _xl_title(ws, 1, "🏷️ Prompt Error Charts",
-                    f"Top {MAX_ERROR_LABELS_FOR_CHART} prompt error labels + Other.", 10)
+                    f"Top {MAX_ERROR_LABELS_FOR_CHART} error labels from AI classification  •  "
+                    "Count = number of sessions where the error was detected  •  "
+                    "Labels per session: 1–3 (multi-label)", 10)
 
     labels, counts = collapsed_error_labels(sessions)
     row = _section_label(ws, row, "Top Error Labels", n_cols=4)
@@ -1823,8 +1986,15 @@ def build_error_chart_sheet(wb, sessions: list[Session]) -> None:
 
 def build_sdlc_sheet(wb, sessions: list[Session]) -> None:
     ws = wb.create_sheet(SDLC_SHEET, 0)
-    row = _xl_title(ws, 1, "🧭 SDLC Task Summary",
-                    "Summary of task names in each SDLC stage.", 8)
+    has_ai = any(s.ai_est_hours is not None for s in sessions)
+    n_summary_cols = 16 if has_ai else 8
+    sdlc_subtitle = (
+        "Assessed = AI blind estimate  |  Self-Rep = user input  |  "
+        "Saved = EST − Actual  |  % = Saved / EST × 100  |  Δ Saved = Self-Rep Saved − Assessed Saved"
+    ) if has_ai else (
+        "Saved = EST − Actual  |  Efficiency % = Saved / EST × 100"
+    )
+    row = _xl_title(ws, 1, "🧭 SDLC Task Summary", sdlc_subtitle, n_summary_cols)
 
     summary_counts = Counter(s.sdlc_category for s in sessions)
     total_sessions = len(sessions)
@@ -1834,7 +2004,7 @@ def build_sdlc_sheet(wb, sessions: list[Session]) -> None:
         for cat in SDLC_TAXONOMY
     }
 
-    row = _section_label(ws, row, "Tasks and Efficiency by SDLC Stage", n_cols=8)
+    row = _section_label(ws, row, "Tasks and Efficiency by SDLC Stage", n_cols=n_summary_cols)
     task_names_by_stage: dict[str, Counter[str]] = {cat: Counter() for cat in SDLC_TAXONOMY}
     for s in sessions:
         cat = s.sdlc_category if s.sdlc_category in SDLC_TAXONOMY else "Other"
@@ -1853,17 +2023,33 @@ def build_sdlc_sheet(wb, sessions: list[Session]) -> None:
 
     summary_rows = []
     for cat in SDLC_TAXONOMY:
-        ag = aggregate_sessions(sessions_by_stage[cat])
-        summary_rows.append([cat, _format_task_names(cat), summary_counts[cat],
-            round(summary_counts[cat] / total_sessions * 100, 1) if total_sessions else 0,
-            ag["est"], ag["actual"], ag["saved"], ag["efficiency"]])
+        items = sessions_by_stage[cat]
+        ag = _agg(items)
+        base = [cat, _format_task_names(cat), summary_counts[cat],
+                round(summary_counts[cat] / total_sessions * 100, 1) if total_sessions else 0]
+        if has_ai:
+            d_sav = round(ag["saved"] - ag["ai_saved"], 1)
+            base += [ag["ai_est"], ag["ai_actual"], ag["ai_saved"], ag["ai_eff"],
+                     ag["est"], ag["actual"], ag["saved"], ag["eff"],
+                     d_sav]
+        else:
+            base += [ag["est"], ag["actual"], ag["saved"], ag["eff"]]
+        summary_rows.append(base)
 
     summary_start = row
-    summary_end, _ = _write_xl_table(ws, row, 1,
-        ["SDLC Stage", "Task Names", "Task Count", "Share %",
-         "EST (h)", "Actual (h)", "Saved (h)", "Efficiency %"], summary_rows)
+    if has_ai:
+        sum_headers = ["SDLC Stage", "Task Names", "Task Count", "Share %",
+                       "Assessed EST", "Assessed Actual", "Assessed Saved", "Assessed %",
+                       "Self-Rep EST", "Self-Rep Actual", "Self-Rep Saved", "Self-Rep %",
+                       "Δ Saved"]
+    else:
+        sum_headers = ["SDLC Stage", "Task Names", "Task Count", "Share %",
+                       "EST (h)", "Actual (h)", "Saved (h)", "Efficiency %"]
+    summary_end, _ = _write_xl_table(ws, row, 1, sum_headers, summary_rows)
     _bar_xl_chart(ws, "Tasks by SDLC Stage", summary_start, summary_end, 3, 3, 1, "F4", y_title="Tasks")
-    _bar_xl_chart(ws, "Efficiency % by SDLC Stage", summary_start, summary_end, 8, 8, 1,
+    eff_col = 8 if has_ai else 8
+    _bar_xl_chart(ws, "Assessed Efficiency % by SDLC Stage" if has_ai else "Efficiency % by SDLC Stage",
+                  summary_start, summary_end, eff_col, eff_col, 1,
                   "O4", y_title="Efficiency %", chart_type="bar", height=10, width=18)
 
     staff_list, matrix_rows = sdlc_staff_matrix(sessions)
@@ -1876,38 +2062,26 @@ def build_sdlc_sheet(wb, sessions: list[Session]) -> None:
         _bar_xl_chart(ws, "Tasks by SDLC Stage and Staff", matrix_start, matrix_end,
                       2, len(staff_list) + 1, 1, "F22", y_title="Tasks", stacked=True)
 
-    task_names, task_chart_rows = sdlc_task_chart_matrix(sessions)
-    task_row = matrix_end + 3
-    task_row = _section_label(ws, task_row, "All Tasks Within Each SDLC Stage",
-                              n_cols=max(5, len(task_names) + 1))
-    task_start = task_row
-    task_end, _ = _write_xl_table(ws, task_row, 1, ["SDLC Stage", *task_names], task_chart_rows)
-    _bar_xl_chart(ws, "Tasks Within Each SDLC Stage", task_start, task_end,
-                  2, len(task_names) + 1, 1, "F40", y_title="SDLC Stage",
-                  stacked=True, chart_type="bar", height=16, width=30)
-
-    detail_rows = sdlc_task_detail_rows(sessions)
-    detail_row = task_end + 3
-    detail_row = _section_label(ws, detail_row, "All Task Details by SDLC Stage", n_cols=8)
+    detail_rows = sdlc_task_detail_rows(sessions, has_ai)
+    detail_row = matrix_end + 3
+    if has_ai:
+        detail_headers = ["SDLC Stage", "Task Name", "Staff", "Date",
+                          "Assessed EST", "Assessed Actual", "Assessed Saved", "Assessed %",
+                          "Self-Rep EST", "Self-Rep Actual", "Self-Rep Saved", "Self-Rep %",
+                          "Δ Saved"]
+    else:
+        detail_headers = ["SDLC Stage", "Task Name", "Staff", "Date",
+                          "EST (h)", "Actual (h)", "Saved (h)", "Efficiency %"]
+    detail_row = _section_label(ws, detail_row, "All Task Details by SDLC Stage",
+                                n_cols=len(detail_headers))
     detail_start = detail_row
-    detail_end, _ = _write_xl_table(ws, detail_row, 1,
-        ["SDLC Stage", "Task Name", "Staff", "Date", "EST (h)", "Actual (h)", "Saved (h)", "Efficiency %"],
-        detail_rows)
+    detail_end, _ = _write_xl_table(ws, detail_row, 1, detail_headers, detail_rows)
 
-    widths = [30, *([18] * len(task_names))]
-    if len(widths) >= 2:
-        widths[1] = 46
-    if len(widths) >= 3:
-        widths[2] = max(widths[2], 16)
-    if len(widths) >= 4:
-        widths[3] = max(widths[3], 12)
-    _set_widths(ws, widths)
+    _set_widths(ws, [30, 46, 12, 10, 12, 12, 12, 10, 12, 12, 12, 10, 10])
     ws.freeze_panes = "A6"
     for row_idx in range(summary_start + 1, summary_end + 1):
         task_count = ws.cell(row=row_idx, column=3).value or 0
         ws.row_dimensions[row_idx].height = min(180, max(42, 18 * int(task_count)))
-    for row_idx in range(task_start + 1, task_end + 1):
-        ws.row_dimensions[row_idx].height = 28
     for row_idx in range(detail_start + 1, detail_end + 1):
         ws.row_dimensions[row_idx].height = 36
 
@@ -2224,6 +2398,14 @@ def _build_chart_data(sessions: list[Session]) -> dict[str, Any]:
     # Raw log for rating distribution
     data["raw_log"] = [{"Tool": s.tool, "Rating": s.rating} for s in sessions]
 
+    # AI estimates for comparison chart
+    data["has_ai_est"] = any(s.ai_est_hours is not None for s in sessions)
+    if data["has_ai_est"]:
+        data["kpis"]["AI EST (No AI)"] = f"{a['ai_est']}h"
+        data["kpis"]["AI Actual (With AI)"] = f"{a['ai_actual']}h"
+        data["kpis"]["AI Hours Saved"] = f"{a['ai_saved']}h"
+        data["kpis"]["AI Savings %"] = f"{a['ai_eff']}%"
+
     return data
 
 
@@ -2495,61 +2677,153 @@ def _wrap_task_bullets(task_counts: Counter[str], width: int = 72) -> str:
 
 
 def chart_sdlc_tasks(sessions: list[Session], pdf: PdfPages, out_dir: Path) -> None:
-    """SDLC stages on the Y-axis with tasks and efficiency per stage."""
+    """SDLC stages: task count + Assessed vs Self-Reported efficiency comparison."""
+    has_ai = any(s.ai_est_hours is not None for s in sessions)
+
     stage_tasks: dict[str, Counter[str]] = {stage: Counter() for stage in SDLC_TAXONOMY}
-    stage_est: dict[str, float] = defaultdict(float)
-    stage_saved: dict[str, float] = defaultdict(float)
-    for s in sessions:
-        stage = s.sdlc_category if s.sdlc_category in SDLC_TAXONOMY else "Other"
-        task_name = s.title or s.task_desc or "(unnamed task)"
-        stage_tasks[stage][task_name] += 1
-        stage_est[stage] += s.est_hours or 0
-        stage_saved[stage] += s.saved_hours or 0
+    stage_aggs: dict[str, dict] = {}
+    for stage in SDLC_TAXONOMY:
+        items = [s for s in sessions
+                 if (s.sdlc_category if s.sdlc_category in SDLC_TAXONOMY else "Other") == stage]
+        for s in items:
+            stage_tasks[stage][s.title or s.task_desc or "(unnamed task)"] += 1
+        stage_aggs[stage] = _agg(items)
 
     stages = [stage for stage in SDLC_TAXONOMY if stage_tasks[stage]]
     if not stages:
         return
 
     counts = [sum(stage_tasks[stage].values()) for stage in stages]
-    efficiency = [(stage_saved[stage] / stage_est[stage] * 100) if stage_est[stage] else 0
-                  for stage in stages]
+    assessed_eff = [stage_aggs[stage]["ai_eff"] for stage in stages]
+    self_rep_eff = [stage_aggs[stage]["eff"] for stage in stages]
     max_count = max(counts) if counts else 1
-    total_distinct_tasks = sum(len(stage_tasks[stage]) for stage in stages)
-    fig_h = min(24, max(7, 2.5 + len(stages) * 0.8 + total_distinct_tasks * 0.22))
+    total_distinct = sum(len(stage_tasks[stage]) for stage in stages)
+    fig_h = min(24, max(7, 2.5 + len(stages) * 0.8 + total_distinct * 0.22))
 
-    fig, (ax, ax_text) = plt.subplots(1, 2, figsize=(18, fig_h),
-        gridspec_kw={"width_ratios": [1.2, 2.3], "wspace": 0.08})
-    fig.suptitle("SDLC Stage to Tasks + Efficiency",
+    if has_ai:
+        fig, (ax_count, ax_eff, ax_text) = plt.subplots(
+            1, 3, figsize=(22, fig_h),
+            gridspec_kw={"width_ratios": [1.0, 1.0, 2.0], "wspace": 0.12})
+    else:
+        fig, (ax_count, ax_text) = plt.subplots(
+            1, 2, figsize=(18, fig_h),
+            gridspec_kw={"width_ratios": [1.2, 2.3], "wspace": 0.08})
+        ax_eff = None
+
+    fig.suptitle("SDLC Stage — Tasks + Efficiency" +
+                 (" (Assessed vs Self-Reported)" if has_ai else ""),
                  fontsize=16, fontweight="bold", color=NAVY, y=0.98)
 
     y = np.arange(len(stages))
     colors = [PALETTE[i % len(PALETTE)] for i in range(len(stages))]
-    bars = ax.barh(y, counts, color=colors, alpha=0.85, height=0.6)
-    for bar, count, eff in zip(bars, counts, efficiency):
-        ax.text(count + max_count * 0.03, bar.get_y() + bar.get_height() / 2,
-                f"{count} tasks | {eff:.1f}%", va="center", fontsize=10,
-                fontweight="bold", color=NAVY)
-    ax.set_yticks(y)
-    ax.set_yticklabels(stages, fontsize=10)
-    ax.set_xlabel("Task count")
-    ax.set_xlim(0, max_count * 1.45)
-    ax.grid(axis="x", alpha=0.3)
-    ax.invert_yaxis()
-    ax.set_title("SDLC stages", fontsize=11, color=GRAY, pad=10)
 
+    # Left panel: task count
+    bars = ax_count.barh(y, counts, color=colors, alpha=0.85, height=0.6)
+    for bar, count in zip(bars, counts):
+        ax_count.text(count + max_count * 0.03, bar.get_y() + bar.get_height() / 2,
+                      str(count), va="center", fontsize=10, fontweight="bold", color=NAVY)
+    ax_count.set_yticks(y)
+    ax_count.set_yticklabels(stages, fontsize=10)
+    ax_count.set_xlabel("Task count")
+    ax_count.set_xlim(0, max_count * 1.35)
+    ax_count.grid(axis="x", alpha=0.3)
+    ax_count.invert_yaxis()
+    ax_count.set_title("Tasks per stage", fontsize=11, color=GRAY, pad=10)
+
+    # Middle panel: efficiency comparison (only when AI estimates exist)
+    if ax_eff is not None:
+        h = 0.25
+        ax_eff.barh(y + h / 2, assessed_eff, h, label="Assessed (AI)",
+                    color="#1A5276", alpha=0.85)
+        ax_eff.barh(y - h / 2, self_rep_eff, h, label="Self-Reported",
+                    color=ORANGE, alpha=0.75)
+        max_eff = max(max(assessed_eff, default=1), max(self_rep_eff, default=1))
+        for i in range(len(stages)):
+            ax_eff.text(assessed_eff[i] + max_eff * 0.02, y[i] + h / 2,
+                        f"{assessed_eff[i]:.0f}%", va="center", fontsize=8, color="#1A5276")
+            ax_eff.text(self_rep_eff[i] + max_eff * 0.02, y[i] - h / 2,
+                        f"{self_rep_eff[i]:.0f}%", va="center", fontsize=8, color=ORANGE)
+        ax_eff.set_yticks(y)
+        ax_eff.set_yticklabels([""] * len(stages))
+        ax_eff.set_xlabel("Efficiency %")
+        ax_eff.legend(loc="lower right", fontsize=8)
+        ax_eff.grid(axis="x", alpha=0.3)
+        ax_eff.invert_yaxis()
+        ax_eff.set_title("Savings % = Saved / EST", fontsize=11, color=GRAY, pad=10)
+
+    # Right panel: task list
     ax_text.set_xlim(0, 1)
-    ax_text.set_ylim(ax.get_ylim())
+    ax_text.set_ylim(ax_count.get_ylim())
     ax_text.axis("off")
     ax_text.set_title("Tasks within each stage", fontsize=11, color=GRAY, pad=10)
     for idx, stage in enumerate(stages):
+        if has_ai:
+            header = f"Assessed: {assessed_eff[idx]:.0f}%  |  Self-Rep: {self_rep_eff[idx]:.0f}%"
+        else:
+            header = f"Efficiency: {self_rep_eff[idx]:.1f}%"
         ax_text.text(0.0, idx,
-                     f"Efficiency: {efficiency[idx]:.1f}%\n{_wrap_task_bullets(stage_tasks[stage])}",
+                     f"{header}\n{_wrap_task_bullets(stage_tasks[stage])}",
                      va="center", ha="left", fontsize=8.2, color=GRAY, linespacing=1.25)
 
-    fig.text(0.5, 0.04,
-             "Left side uses SDLC Stage on the Y-axis; labels show task count and efficiency % = saved hours / EST hours.",
-             ha="center", fontsize=9, color=GRAY)
+    footer = "Efficiency % = Saved / EST × 100"
+    if has_ai:
+        footer += "  |  Assessed = AI blind estimate  |  Self-Reported = user input"
+    fig.text(0.5, 0.04, footer, ha="center", fontsize=9, color=GRAY)
     _save_chart(fig, pdf, out_dir, "01_sdlc_tasks_by_stage")
+
+
+def chart_user_vs_ai(sessions: list[Session], pdf: PdfPages, out_dir: Path) -> None:
+    """Grouped bar chart: User EST/Actual/Saved vs AI EST/Actual/Saved per staff."""
+    if not any(s.ai_est_hours is not None for s in sessions):
+        return
+
+    by_staff: dict[str, list[Session]] = {}
+    for s in sessions:
+        by_staff.setdefault(s.staff, []).append(s)
+
+    staff_names = sorted(by_staff, key=lambda k: -sum(s.time_saved or 0 for s in by_staff[k]))
+    aggs = {staff: _agg(by_staff[staff]) for staff in staff_names}
+
+    y = np.arange(len(staff_names))
+    h = 0.18
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, max(4, len(staff_names) * 1.2 + 2)),
+                              sharey=True)
+    fig.suptitle("Assessed (AI) vs Self-Reported (User) — Per Staff",
+                 fontsize=16, fontweight="bold", color=NAVY, y=0.98)
+
+    metrics = [
+        ("EST (No AI)", "ai_est", "est", "#D35400", ORANGE),
+        ("Actual (With AI)", "ai_actual", "actual", "#1A5276", BLUE),
+        ("Hours Saved", "ai_saved", "saved", "#196F3D", GREEN),
+    ]
+
+    for ax, (title, a_key, u_key, a_color, u_color) in zip(axes, metrics):
+        a_vals = [aggs[s][a_key] for s in staff_names]
+        u_vals = [aggs[s][u_key] for s in staff_names]
+
+        ax.barh(y + h / 2, a_vals, h, label="Assessed (AI)", color=a_color, alpha=0.85)
+        ax.barh(y - h / 2, u_vals, h, label="Self-Reported", color=u_color, alpha=0.65,
+                edgecolor=a_color, linewidth=0.8)
+
+        max_val = max(max(a_vals, default=1), max(u_vals, default=1))
+        for i in range(len(staff_names)):
+            if a_vals[i]:
+                ax.text(a_vals[i] + max_val * 0.02, y[i] + h / 2,
+                        f"{a_vals[i]:.1f}", va="center", fontsize=8, color=a_color)
+            if u_vals[i]:
+                ax.text(u_vals[i] + max_val * 0.02, y[i] - h / 2,
+                        f"{u_vals[i]:.1f}", va="center", fontsize=8, color=u_color)
+
+        ax.set_yticks(y)
+        ax.set_yticklabels(staff_names)
+        ax.set_xlabel("Hours")
+        ax.set_title(title, fontsize=12, color=GRAY)
+        ax.legend(loc="lower right", fontsize=8)
+        ax.grid(axis="x", alpha=0.3)
+        ax.invert_yaxis()
+
+    _save_chart(fig, pdf, out_dir, "09_user_vs_ai_comparison")
 
 
 def generate_pdf_charts(sessions: list[Session], out_dir: Path) -> None:
@@ -2568,6 +2842,7 @@ def generate_pdf_charts(sessions: list[Session], out_dir: Path) -> None:
         chart_efficiency(data, pdf, out_dir)
         chart_rating(data, pdf, out_dir)
         chart_errors_from_sessions(sessions, pdf, out_dir)
+        chart_user_vs_ai(sessions, pdf, out_dir)
 
     pngs = list(out_dir.glob("*.png"))
     print(f"   PDF: {pdf_path}")
