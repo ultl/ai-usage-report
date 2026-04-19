@@ -39,7 +39,7 @@ from typing import Any
 
 import requests
 from openpyxl import Workbook, load_workbook
-from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.chart import BarChart, Reference
 from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -97,13 +97,15 @@ ERROR_CHART_SHEET = "🏷️ Error Charts"
 SDLC_SHEET = "🧭 SDLC Summary"
 
 GENERATED_SHEETS = [
-    SDLC_SHEET, EFFICIENCY_SHEET, RATING_SHEET,
-    ERROR_DATA_SHEET, ERROR_CHART_SHEET, "🧭 SDLC Data",
+    SDLC_SHEET, ERROR_DATA_SHEET, ERROR_CHART_SHEET,
+    # legacy — removed but cleaned up if present from older runs
+    "🧭 SDLC Data", EFFICIENCY_SHEET, RATING_SHEET,
 ]
 
 # Cache
 LESSON_CACHE_PATH = Path(".ai_journal_cache.json")
 CHART_CACHE_PATH = Path(".ai_chart_cache.json")
+TRANSLATE_CACHE_PATH = Path(".ai_translate_cache.json")
 PROMPT_VERSION = "chart-classifier-v1"
 MAX_ERROR_LABELS_FOR_CHART = 10
 MAX_LABELS_PER_SESSION = 3
@@ -189,18 +191,18 @@ plt.rcParams.update({
 # --------------------------------------------------------------------------- #
 
 ERROR_TAXONOMY: dict[str, str] = {
-    "Clear and Format": "Prompt thiếu yêu cầu rõ ràng, thiếu format/schema đầu ra, hoặc thiếu các bước tuần tự/ràng buộc cụ thể.",
-    "Missing Context": "Prompt thiếu bối cảnh nghiệp vụ, stack công nghệ, dữ liệu nền, mục tiêu, hoặc người dùng cuối.",
-    "Missing Examples": "Task lặp lại/phức tạp nhưng prompt thiếu ví dụ few-shot hoặc ví dụ không đủ đa dạng.",
-    "Weak Structure": "Prompt trộn lẫn instruction, context, input, output hoặc thiếu cấu trúc rõ như XML tags.",
-    "No Role": "Prompt không gán vai trò/persona chuyên môn phù hợp cho AI.",
-    "Negative Instruction": "Prompt tập trung vào điều không được làm thay vì hướng dẫn tích cực AI phải làm gì.",
-    "Missing Grounding": "Task phân tích tài liệu/dữ liệu nhưng không yêu cầu AI trích dẫn hoặc bám vào bằng chứng.",
-    "No Self-check": "Prompt không yêu cầu AI tự kiểm tra kết quả trước khi trả lời.",
-    "Long Context Ordering": "Prompt có input dài/tài liệu dài nhưng đặt câu hỏi hoặc instruction ở vị trí dễ gây nhiễu.",
-    "Ambiguous Scope": "Prompt thiếu phạm vi, tiêu chí hoàn thành, constraint, hoặc boundary nên AI dễ suy diễn sai.",
-    "Tool Or Environment Missing": "Prompt thiếu thông tin về tool, môi trường chạy, framework, file/schema, hoặc dữ liệu đầu vào.",
-    "Insufficient Lesson Data": "Bài học người dùng và bài học AI đều thiếu hoặc quá mơ hồ để suy ra lỗi prompt đáng tin cậy.",
+    "Clear and Format": "Prompt lacks clear requirements, output format/schema, or sequential steps/constraints.",
+    "Missing Context": "Prompt lacks business context, tech stack, background data, goals, or target audience.",
+    "Missing Examples": "Complex/repeated task but prompt lacks few-shot examples or examples are not diverse enough.",
+    "Weak Structure": "Prompt mixes instruction, context, input, output without clear structure like XML tags.",
+    "No Role": "Prompt does not assign an appropriate expert role/persona to the AI.",
+    "Negative Instruction": "Prompt focuses on what NOT to do instead of positively guiding what AI should do.",
+    "Missing Grounding": "Document/data analysis task but prompt does not ask AI to quote or ground in evidence.",
+    "No Self-check": "Prompt does not ask AI to verify its own output before responding.",
+    "Long Context Ordering": "Prompt has long input/documents but places questions or instructions in a position that causes noise.",
+    "Ambiguous Scope": "Prompt lacks scope, completion criteria, constraints, or boundaries so AI may infer incorrectly.",
+    "Tool Or Environment Missing": "Prompt lacks info about tool, runtime environment, framework, file/schema, or input data.",
+    "Insufficient Lesson Data": "Both user lesson and AI lesson are missing or too vague to reliably infer prompt errors.",
 }
 
 SDLC_TAXONOMY: dict[str, str] = {
@@ -220,9 +222,9 @@ SDLC_TAXONOMY: dict[str, str] = {
 
 # Error labels used by charts.py-style classification
 ERROR_LABELS = [
-    "Thiếu Output Format", "Thiếu Context / Motivation", "Prompt Không Rõ Ràng",
-    "Thiếu Ví Dụ (Few-shot)", "Không Gán Role", "Thiếu XML Structure",
-    "Thiếu Self-check", "Scope Mơ Hồ", "Thiếu Constraints", "Sai Thứ Tự Long-context",
+    "Missing Output Format", "Missing Context / Motivation", "Unclear Prompt",
+    "Missing Examples (Few-shot)", "No Role Assignment", "Missing XML Structure",
+    "No Self-check", "Ambiguous Scope", "Missing Constraints", "Wrong Long-context Order",
 ]
 
 
@@ -466,27 +468,211 @@ def parse_file(path: Path) -> list[Session]:
 
 
 # =========================================================================== #
+#  Section 4b — Translation to English
+# =========================================================================== #
+
+TRANSLATE_FIELDS = ["title", "tool", "category", "task_desc", "prompt", "result",
+                    "quality_text", "user_lesson", "tags"]
+
+TRANSLATE_PROMPT = """<role>You are a professional translator specializing in software development.</role>
+
+<task>
+Translate the following Vietnamese text fields to natural, professional English.
+You MUST return ALL fields for every item, even if a field is already in English — return it unchanged.
+</task>
+
+<rules>
+- Translate all Vietnamese text to English.
+- Keep technical terms, code snippets, file paths, and variable names unchanged.
+- If a field is already in English, return it as-is (do NOT omit it).
+- If a field is empty, return empty string.
+- Use standard software development terminology in English.
+- Do NOT add explanations — just translate.
+- You MUST include every field (title, tool, category, task_desc, prompt, result, quality_text, user_lesson, tags) in every result object.
+</rules>
+
+<input>
+{sessions_json}
+</input>
+
+<output_format>
+Return ONLY a valid JSON object, no markdown:
+{{"results": [{{"id": 0, "title": "...", "tool": "...", "category": "...", "task_desc": "...", "prompt": "...", "result": "...", "quality_text": "...", "user_lesson": "...", "tags": "..."}}, ...]}}
+
+IMPORTANT: Every result object MUST contain ALL 9 fields. Do not skip any field.
+</output_format>"""
+
+
+def _translate_hash(s: Session) -> str:
+    key = "|".join([getattr(s, f) or "" for f in TRANSLATE_FIELDS])
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()
+
+
+def translate_sessions_batch(sessions: list[Session], model: str,
+                             batch_size: int = 5) -> None:
+    """Translate Vietnamese text fields to English using LLM."""
+    cache = _load_json_cache(TRANSLATE_CACHE_PATH)
+
+    # Compute hashes before any modifications
+    hashes: dict[int, str] = {}
+    misses: list[Session] = []
+    hits = 0
+
+    for s in sessions:
+        h = _translate_hash(s)
+        hashes[id(s)] = h
+        if h in cache:
+            c = cache[h]
+            for f in TRANSLATE_FIELDS:
+                if f in c:
+                    setattr(s, f, c[f])
+            hits += 1
+        else:
+            misses.append(s)
+
+    total = len(sessions)
+    print(f"\n🌐  Translating {total} sessions to English ({model})...")
+    print(f"   Cache hits: {hits}/{total}, translating {len(misses)} session(s)...")
+
+    for start in range(0, len(misses), batch_size):
+        batch = misses[start:start + batch_size]
+        print(f"  • Batch {start // batch_size + 1}: {len(batch)} session(s)")
+
+        items = []
+        for i, s in enumerate(batch):
+            item: dict[str, Any] = {"id": i}
+            for f in TRANSLATE_FIELDS:
+                item[f] = _truncate(getattr(s, f) or "", 2000)
+            items.append(item)
+
+        prompt = TRANSLATE_PROMPT.format(
+            sessions_json=json.dumps(items, ensure_ascii=False))
+
+        try:
+            raw = _call_openai(model, prompt, timeout=300)
+            parsed = _parse_json_object(raw)
+
+            results: list[dict] = []
+            if isinstance(parsed, list):
+                results = parsed
+            elif isinstance(parsed, dict):
+                for key in ("results", "data", "sessions"):
+                    if key in parsed and isinstance(parsed[key], list):
+                        results = parsed[key]
+                        break
+                if not results and "id" in parsed:
+                    results = [parsed]
+
+            # Mark which sessions got a response
+            seen_idx: set[int] = set()
+            for item in results:
+                idx = item.get("id", -1)
+                if not (0 <= idx < len(batch)):
+                    continue
+                seen_idx.add(idx)
+                s = batch[idx]
+                h = hashes[id(s)]
+                translated: dict[str, str] = {}
+                for f in TRANSLATE_FIELDS:
+                    if f in item and item[f]:
+                        val = str(item[f]).strip()
+                        if val:
+                            setattr(s, f, val)
+                            translated[f] = val
+                    else:
+                        # Keep original value in cache so we don't re-query
+                        translated[f] = getattr(s, f) or ""
+                cache[h] = translated
+
+            # Cache sessions the LLM didn't return (keep originals)
+            for idx, s in enumerate(batch):
+                if idx not in seen_idx:
+                    h = hashes[id(s)]
+                    cache[h] = {f: getattr(s, f) or "" for f in TRANSLATE_FIELDS}
+        except Exception as e:
+            print(f"  ⚠  Translation batch failed: {e}", file=sys.stderr)
+
+    # Retry pass: catch any fields the LLM left in Vietnamese
+    vn_re = re.compile(r'[àáảãạăắằẳẵặâấầẩẫậèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵđ]', re.I)
+    retry: list[Session] = []
+    for s in sessions:
+        for f in TRANSLATE_FIELDS:
+            if vn_re.search(getattr(s, f) or ""):
+                retry.append(s)
+                break
+
+    if retry:
+        print(f"  🔄  Retrying {len(retry)} session(s) with remaining Vietnamese...")
+        for s in retry:
+            item = {"id": 0}
+            for f in TRANSLATE_FIELDS:
+                item[f] = _truncate(getattr(s, f) or "", 2000)
+            prompt = TRANSLATE_PROMPT.format(
+                sessions_json=json.dumps([item], ensure_ascii=False))
+            try:
+                raw = _call_openai(model, prompt, timeout=300)
+                parsed = _parse_json_object(raw)
+                results_list = parsed.get("results", [parsed]) if isinstance(parsed, dict) else parsed
+                if results_list:
+                    r_item = results_list[0] if isinstance(results_list, list) else results_list
+                    # Use the ORIGINAL hash stored before any modifications
+                    orig_h = hashes[id(s)]
+                    translated: dict[str, str] = {}
+                    for f in TRANSLATE_FIELDS:
+                        if f in r_item and r_item[f]:
+                            val = str(r_item[f]).strip()
+                            if val:
+                                setattr(s, f, val)
+                                translated[f] = val
+                            else:
+                                translated[f] = getattr(s, f) or ""
+                        else:
+                            translated[f] = getattr(s, f) or ""
+                    cache[orig_h] = translated
+            except Exception as e:
+                print(f"  ⚠  Retry failed: {e}", file=sys.stderr)
+
+    _save_json_cache(TRANSLATE_CACHE_PATH, cache)
+    print(f"✔  Translation done. Cache: {TRANSLATE_CACHE_PATH}")
+
+
+def _parse_json_object(raw: str) -> dict[str, Any]:
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", (raw or "").strip(), flags=re.MULTILINE)
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, (dict, list)):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if not match:
+        raise ValueError("Model response did not contain a JSON object")
+    parsed = json.loads(match.group(0))
+    return parsed
+
+
+# =========================================================================== #
 #  Section 5 — AI Lesson Inference (Phase 1 AI)
 # =========================================================================== #
 
 LESSON_PROMPT_TEMPLATE = """<role>
-Bạn là chuyên gia prompt engineering, thành thạo "Claude Prompting Best Practices" của Anthropic.
-Nhiệm vụ của bạn: phân tích một phiên làm việc AI thực tế, chấm điểm, và viết lại prompt theo đúng best practices.
+You are an expert in prompt engineering, well-versed in Anthropic's "Claude Prompting Best Practices".
+Your task: analyze a real AI work session, score the output, and rewrite the prompt following best practices.
 </role>
 
 <best_practices_rubric>
-Dùng CHÍNH XÁC các nguyên tắc sau (Anthropic Claude Prompting Best Practices) làm thước đo:
+Use EXACTLY these principles (Anthropic Claude Prompting Best Practices) as your scoring rubric:
 
-1. **Clear & Direct** — Prompt có nêu cụ thể định dạng đầu ra, ràng buộc, và các bước tuần tự không?
-2. **Context & Motivation** — Prompt có giải thích *tại sao* (mục tiêu, đối tượng dùng, bối cảnh nghiệp vụ) không?
-3. **Examples (few-shot)** — Với task phức tạp/lặp lại, có kèm 2–5 ví dụ đa dạng không?
-4. **XML Structure** — Các phần khác nhau có được tách bằng XML tags nhất quán không?
-5. **Role Assignment** — Có gán vai trò/persona cụ thể cho AI không?
-6. **Long-context Ordering** — Với input dài, dữ liệu dài có được đặt TRÊN câu hỏi/instructions không?
-7. **Positive Instructions** — Nói AI *phải làm gì* thay vì *không được làm gì*?
-8. **Ground in Quotes** — Với task phân tích tài liệu dài, có yêu cầu AI trích dẫn phần liên quan trước khi xử lý không?
-9. **Self-check** — Có yêu cầu AI tự kiểm tra lại kết quả trước khi kết thúc không?
-10. **Output Format Specification** — Schema đầu ra có được định nghĩa rõ không?
+1. **Clear & Direct** — Does the prompt specify output format, constraints, and sequential steps?
+2. **Context & Motivation** — Does the prompt explain *why* (goals, target audience, business context)?
+3. **Examples (few-shot)** — For complex/repeated tasks, are 2–5 diverse examples included?
+4. **XML Structure** — Are different sections separated with consistent XML tags?
+5. **Role Assignment** — Is a specific role/persona assigned to the AI?
+6. **Long-context Ordering** — For long inputs, is the data placed ABOVE the question/instructions?
+7. **Positive Instructions** — Does it tell AI *what to do* rather than *what not to do*?
+8. **Ground in Quotes** — For document analysis, does it ask AI to quote relevant parts first?
+9. **Self-check** — Does it ask AI to verify its own output before finishing?
+10. **Output Format Specification** — Is the output schema clearly defined?
 </best_practices_rubric>
 
 <session_to_analyze>
@@ -500,44 +686,44 @@ Dùng CHÍNH XÁC các nguyên tắc sau (Anthropic Claude Prompting Best Practi
 </session_to_analyze>
 
 <instructions>
-Thực hiện các bước sau theo thứ tự:
+Perform the following steps in order:
 
-1. **Đọc <user_prompt>** và kiểm tra nó đáp ứng được nguyên tắc nào trong <best_practices_rubric>, vi phạm nguyên tắc nào. Xác định 1–2 nguyên tắc BỊ VI PHẠM NẶNG NHẤT.
+1. **Read <user_prompt>** and check which principles from <best_practices_rubric> it meets or violates. Identify the 1–2 MOST SEVERELY VIOLATED principles.
 
-2. **Viết `ai_lesson`** (tiếng Việt, 2–3 câu, CỰC KỲ CỤ THỂ):
-   - Chỉ đích danh nguyên tắc bị vi phạm (tên + số thứ tự từ rubric).
-   - Trích dẫn hoặc mô tả chính xác phần nào trong <user_prompt> thiếu/yếu.
-   - Giải thích ngắn gọn hậu quả quan sát được trong <ai_result>.
-   - KHÔNG viết chung chung — phải chỉ rõ context NÀO bị thiếu.
+2. **Write `ai_lesson`** (English, 2–3 sentences, EXTREMELY SPECIFIC):
+   - Name the violated principle (name + number from rubric).
+   - Quote or describe exactly which part of <user_prompt> is missing/weak.
+   - Briefly explain the observed consequence in <ai_result>.
+   - Do NOT write generically — specify exactly WHAT context is missing.
 
-3. **So sánh với <user_self_lesson>** → chọn MỘT nhãn cho `comparison`:
-   - "Đồng thuận" — bài học của bạn và user trùng về nguyên tắc chính.
-   - "Bổ sung" — bạn chỉ ra thêm nguyên tắc user chưa nhận ra.
-   - "Khác biệt" — bạn và user chỉ ra nguyên tắc khác nhau.
-   - "Người dùng để trống" — <user_self_lesson> rỗng hoặc "(trống)".
+3. **Compare with <user_self_lesson>** → choose ONE label for `comparison`:
+   - "Agree" — your lesson and user's align on the main principle.
+   - "Supplement" — you identify additional principles the user missed.
+   - "Disagree" — you and user point to different principles.
+   - "User left blank" — <user_self_lesson> is empty or "(empty)".
 
-4. **Chấm `ai_rating` 1–5** mức độ <ai_result> đáp ứng <task_description>:
-   - 1=không đạt, 2=kém, 3=trung bình, 4=tốt, 5=xuất sắc.
-   - Viết `ai_rating_reason` (1 câu tiếng Việt).
+4. **Score `ai_rating` 1–5** how well <ai_result> meets <task_description>:
+   - 1=fail, 2=poor, 3=average, 4=good, 5=excellent.
+   - Write `ai_rating_reason` (1 sentence in English).
 
-5. **Viết `suggested_prompt`** — phiên bản cải tiến của <user_prompt>, ÁP DỤNG tất cả best practices liên quan. BẮT BUỘC:
-   - Bắt đầu bằng <role>...</role> gán vai trò cụ thể cho AI.
-   - Có <context>...</context> nêu bối cảnh, stack công nghệ.
-   - Có <task>...</task> liệt kê yêu cầu bằng các bước đánh số.
-   - Có <constraints>...</constraints> với ràng buộc rõ ràng.
-   - Có <output_format>...</output_format> mô tả schema/định dạng mong muốn.
-   - Nếu task cần ví dụ: kèm <examples><example>...</example></examples>.
-   - Kết thúc bằng 1 câu yêu cầu AI self-check trước khi trả lời.
-   - Prompt BẰNG TIẾNG VIỆT, sẵn sàng copy-paste dùng lại, dài 200–500 từ.
-   - KHÔNG viết placeholder — phải điền dữ liệu thật từ <task_description>.
+5. **Write `suggested_prompt`** — improved version of <user_prompt>, APPLYING all relevant best practices. MUST include:
+   - Start with <role>...</role> assigning a specific role.
+   - Include <context>...</context> with background and tech stack.
+   - Include <task>...</task> listing requirements with numbered steps.
+   - Include <constraints>...</constraints> with clear constraints.
+   - Include <output_format>...</output_format> describing expected schema.
+   - If task needs examples: include <examples><example>...</example></examples>.
+   - End with 1 sentence asking AI to self-check before responding.
+   - Prompt in ENGLISH, ready to copy-paste, 200–500 words.
+   - Do NOT use placeholders — fill in real data from <task_description>.
 </instructions>
 
 <output_format>
-Trả về DUY NHẤT một đối tượng JSON hợp lệ, không markdown, không giải thích thêm:
+Return ONLY a single valid JSON object, no markdown, no extra explanation:
 {{"ai_lesson": "...", "comparison": "...", "ai_rating": 4, "ai_rating_reason": "...", "suggested_prompt": "..."}}
 </output_format>
 
-Trước khi trả lời, hãy tự kiểm tra: (a) ai_lesson có chỉ đích danh nguyên tắc cụ thể không? (b) suggested_prompt có đủ 5 XML tag bắt buộc không? (c) JSON có hợp lệ không?"""
+Before responding, self-check: (a) does ai_lesson name a specific principle? (b) does suggested_prompt have all 5 required XML tags? (c) is the JSON valid?"""
 
 
 def _parse_lesson_response(raw: str) -> tuple[str, str, float | None, str, str]:
@@ -594,13 +780,13 @@ def infer_lessons_batch(sessions: list[Session], model: str) -> None:
             title=_truncate(s.title, 200), tool=s.tool, category=s.category,
             task_desc=_truncate(s.task_desc), prompt=_truncate(s.prompt),
             result=_truncate(s.result),
-            user_lesson=_truncate(s.user_lesson, 600) or "(trống)",
+            user_lesson=_truncate(s.user_lesson, 600) or "(empty)",
         )
         try:
             raw = _call_openai(model, prompt)
             ai_lesson, comparison, ai_rating, reason, suggested = _parse_lesson_response(raw)
             s.ai_lesson = ai_lesson
-            s.comparison = comparison or ("Người dùng để trống" if not s.user_lesson else "Khác biệt")
+            s.comparison = comparison or ("User left blank" if not s.user_lesson else "Disagree")
             s.ai_rating = ai_rating
             s.ai_rating_reason = reason
             s.suggested_prompt = suggested
@@ -612,7 +798,7 @@ def infer_lessons_batch(sessions: list[Session], model: str) -> None:
             rating_str = f"{ai_rating:.0f}" if ai_rating else "—"
             print(f"  [{i}/{total}] {s.staff} — {s.title[:50]}  →  {s.comparison} ({rating_str})")
         except requests.RequestException as e:
-            s.ai_lesson = f"[Lỗi AI: {e}]"
+            s.ai_lesson = f"[AI Error: {e}]"
             s.comparison = "—"
             print(f"  [{i}/{total}] ⚠  {e}", file=sys.stderr)
     _save_json_cache(LESSON_CACHE_PATH, cache)
@@ -719,7 +905,7 @@ def _title_block(ws, title: str, subtitle: str, n_cols: int) -> int:
 
 def _write_total_row(ws, row: int, n_cols: int, hr: int, sum_cols: list[int],
                      avg_cols: list[int] | None = None) -> None:
-    ws.cell(row=row, column=1, value="TỔNG")
+    ws.cell(row=row, column=1, value="TOTAL")
     for c in sum_cols:
         col_letter = get_column_letter(c)
         ws.cell(row=row, column=c, value=f"=SUM({col_letter}{hr+1}:{col_letter}{row-1})")
@@ -733,32 +919,43 @@ def _write_total_row(ws, row: int, n_cols: int, hr: int, sum_cols: list[int],
         cell.font = TOTAL_FONT
 
 
-def build_summary_sheet(wb: Workbook, sessions: list[Session]) -> None:
-    ws = wb.create_sheet("📊 Tổng Quan")
+def build_dashboard_sheet(wb: Workbook, sessions: list[Session]) -> None:
+    """Combined Overview + Breakdown (Staff/Tool/Category) + Rating + Daily Trend on one sheet."""
+    ws = wb.create_sheet("📊 Dashboard")
+    n_cols = 10
+    metric_headers = ["Sessions", "EST (h)", "Actual (h)", "Saved (h)",
+                      "Savings %", "Avg Saved/Session", "Avg Rating", "5★ Sessions"]
+
+    # ── KPI Overview ──
     a = _agg(sessions)
     n_staff = len({s.staff for s in sessions})
-    n_cols = 7
-    hr = _title_block(ws, "📊  TỔNG QUAN  —  AI Dev Journal Consolidated Report",
-                      f"Generated {datetime.now().strftime('%d/%m/%Y %H:%M')}  •  "
-                      f"{n_staff} staff  •  {a['n']} sessions", n_cols)
+    ws.cell(row=1, column=1,
+            value="📊  AI DEV JOURNAL  —  Consolidated Report").font = TITLE_FONT
+    ws.merge_cells(start_row=1, end_row=1, start_column=1, end_column=n_cols)
+    ws.cell(row=2, column=1,
+            value=f"Generated {datetime.now().strftime('%d/%m/%Y %H:%M')}  •  "
+                  f"{n_staff} staff  •  {a['n']} sessions").font = SUBTITLE_FONT
+    ws.merge_cells(start_row=2, end_row=2, start_column=1, end_column=n_cols)
+    ws.row_dimensions[1].height = 22
 
-    headers = ["Chỉ Số", "Giá Trị", "", "Top 5 Công Cụ AI", "Phiên", "Giờ Tiết Kiệm", "Tỷ Lệ Tiết Kiệm %"]
-    for i, h in enumerate(headers, 1):
-        ws.cell(row=hr, column=i, value=h)
-    _style_header(ws, hr, n_cols)
+    kpi_hr = 4
+    kpi_headers = ["Metric", "Value", "", "Top 5 AI Tools", "Sessions", "Hours Saved", "Savings %"]
+    for i, h in enumerate(kpi_headers, 1):
+        ws.cell(row=kpi_hr, column=i, value=h)
+    _style_header(ws, kpi_hr, 7)
 
     kpis = [
-        ("Tổng số phiên", a["n"]), ("Số staff", n_staff),
-        ("Tổng EST (không AI)", f"{a['est']}h"), ("Tổng Actual (có AI)", f"{a['actual']}h"),
-        ("Tổng giờ tiết kiệm", f"{a['saved']}h"),
-        ("Tỷ lệ thời gian tiết kiệm", f"{a['eff']}%"),
-        ("Giờ tiết kiệm TB/phiên", f"{a['avg_saved']}h"),
-        ("Chất lượng trung bình", f"{a['avg_rating']} / 5"),
-        ("Phiên xuất sắc (5★)", a["excellent"]),
+        ("Total Sessions", a["n"]), ("Staff Count", n_staff),
+        ("Total EST (No AI)", f"{a['est']}h"), ("Total Actual (With AI)", f"{a['actual']}h"),
+        ("Total Hours Saved", f"{a['saved']}h"),
+        ("Time Savings %", f"{a['eff']}%"),
+        ("Avg Saved/Session", f"{a['avg_saved']}h"),
+        ("Avg Quality Rating", f"{a['avg_rating']} / 5"),
+        ("Excellent Sessions (5★)", a["excellent"]),
     ]
     for i, (k, v) in enumerate(kpis):
-        ws.cell(row=hr + 1 + i, column=1, value=k).font = CELL_FONT
-        ws.cell(row=hr + 1 + i, column=2, value=v).font = NUMBER_FONT
+        ws.cell(row=kpi_hr + 1 + i, column=1, value=k).font = CELL_FONT
+        ws.cell(row=kpi_hr + 1 + i, column=2, value=v).font = NUMBER_FONT
 
     tool_data: dict[str, dict] = {}
     for s in sessions:
@@ -770,122 +967,128 @@ def build_summary_sheet(wb: Workbook, sessions: list[Session]) -> None:
     top_tools = sorted(tool_data.items(), key=lambda x: -x[1]["saved"])[:5]
     for i, (t, d) in enumerate(top_tools):
         eff = (d["saved"] / d["est"] * 100) if d["est"] else 0
-        ws.cell(row=hr + 1 + i, column=4, value=t).font = CELL_FONT
-        ws.cell(row=hr + 1 + i, column=5, value=d["n"]).font = NUMBER_FONT
-        ws.cell(row=hr + 1 + i, column=6, value=round(d["saved"], 1)).font = NUMBER_FONT
-        ws.cell(row=hr + 1 + i, column=7, value=f"{eff:.0f}%").font = NUMBER_FONT
+        ws.cell(row=kpi_hr + 1 + i, column=4, value=t).font = CELL_FONT
+        ws.cell(row=kpi_hr + 1 + i, column=5, value=d["n"]).font = NUMBER_FONT
+        ws.cell(row=kpi_hr + 1 + i, column=6, value=round(d["saved"], 1)).font = NUMBER_FONT
+        ws.cell(row=kpi_hr + 1 + i, column=7, value=f"{eff:.0f}%").font = NUMBER_FONT
 
-    last_row = hr + max(len(kpis), len(top_tools))
-    _style_data_range(ws, hr + 1, last_row, n_cols)
-    _set_widths(ws, [28, 18, 3, 30, 10, 16, 14])
+    last_kpi = kpi_hr + max(len(kpis), len(top_tools))
+    _style_data_range(ws, kpi_hr + 1, last_kpi, 7)
+    cursor = last_kpi + 2
 
-
-def build_per_staff_sheet(wb: Workbook, sessions: list[Session]) -> None:
-    ws = wb.create_sheet("👤 Per Staff")
-    headers = ["Staff", "Số Phiên", "EST (h)", "Actual (h)", "Tiết Kiệm (h)",
-               "Tỷ Lệ Tiết Kiệm %", "TB Tiết Kiệm/Phiên", "Rating TB", "Phiên 5★", "Công Cụ Chính"]
-    n_cols = len(headers)
-    hr = _title_block(ws, "👤  THỐNG KÊ THEO STAFF", "Ranking by total hours saved", n_cols)
-    for i, h in enumerate(headers, 1):
-        ws.cell(row=hr, column=i, value=h)
-    _style_header(ws, hr, n_cols)
+    # ── By Staff ──
+    _section = lambda ws, r, text: (
+        ws.cell(row=r, column=1).__setattr__("value", text),
+        setattr(ws.cell(row=r, column=1), "font",
+                Font(name="Arial", bold=True, size=12, color="1F4E78")),
+        ws.merge_cells(start_row=r, end_row=r, start_column=1, end_column=n_cols),
+    )
+    _section(ws, cursor, "BY STAFF")
+    cursor += 1
+    staff_headers = ["Staff"] + metric_headers + ["Primary Tool"]
+    for i, h in enumerate(staff_headers, 1):
+        ws.cell(row=cursor, column=i, value=h)
+    _style_header(ws, cursor, len(staff_headers))
 
     by_staff: dict[str, list[Session]] = {}
     for s in sessions:
         by_staff.setdefault(s.staff, []).append(s)
-
-    rows = []
+    staff_rows = []
     for staff, items in by_staff.items():
-        a = _agg(items)
+        sa = _agg(items)
         tools: dict[str, int] = {}
         for s in items:
             if s.tool:
                 tools[s.tool] = tools.get(s.tool, 0) + 1
         main_tool = max(tools.items(), key=lambda x: x[1])[0] if tools else "—"
-        rows.append((staff, a["n"], a["est"], a["actual"], a["saved"],
-                      a["eff"], a["avg_saved"], a["avg_rating"], a["excellent"], main_tool))
-
-    rows.sort(key=lambda r: -r[4])
-    for i, row in enumerate(rows):
+        staff_rows.append((staff, sa["n"], sa["est"], sa["actual"], sa["saved"],
+                           sa["eff"], sa["avg_saved"], sa["avg_rating"], sa["excellent"], main_tool))
+    staff_rows.sort(key=lambda r: -r[4])
+    for i, row in enumerate(staff_rows):
         for j, v in enumerate(row, 1):
-            ws.cell(row=hr + 1 + i, column=j, value=v)
+            ws.cell(row=cursor + 1 + i, column=j, value=v)
+    total_r = cursor + 1 + len(staff_rows)
+    _write_total_row(ws, total_r, len(staff_headers), cursor,
+                     sum_cols=[2, 3, 4, 5, 9], avg_cols=[6, 7, 8])
+    _style_data_range(ws, cursor + 1, total_r, len(staff_headers))
+    cursor = total_r + 2
 
-    total_row = hr + 1 + len(rows)
-    _write_total_row(ws, total_row, n_cols, hr, sum_cols=[2, 3, 4, 5, 9], avg_cols=[6, 7, 8])
-    _style_data_range(ws, hr + 1, total_row, n_cols)
-    _set_widths(ws, [16, 10, 12, 12, 14, 12, 16, 10, 10, 24])
-
-
-def build_per_tool_sheet(wb: Workbook, sessions: list[Session]) -> None:
-    ws = wb.create_sheet("🔧 Per Tool")
-    headers = ["Công Cụ AI", "Số Phiên", "EST (h)", "Actual (h)", "Tiết Kiệm (h)",
-               "Tỷ Lệ Tiết Kiệm %", "TB Tiết Kiệm/Phiên", "Rating TB", "Phiên 5★"]
-    n_cols = len(headers)
-    hr = _title_block(ws, "🔧  THỐNG KÊ THEO CÔNG CỤ AI", "Ranking by total hours saved", n_cols)
-    for i, h in enumerate(headers, 1):
-        ws.cell(row=hr, column=i, value=h)
-    _style_header(ws, hr, n_cols)
+    # ── By Tool ──
+    tool_headers = ["AI Tool"] + metric_headers
+    n_tool = len(tool_headers)
+    _section(ws, cursor, "BY AI TOOL")
+    cursor += 1
+    for i, h in enumerate(tool_headers, 1):
+        ws.cell(row=cursor, column=i, value=h)
+    _style_header(ws, cursor, n_tool)
 
     by_tool: dict[str, list[Session]] = {}
     for s in sessions:
-        key = s.tool or "(không rõ)"
-        by_tool.setdefault(key, []).append(s)
-
-    rows = []
+        by_tool.setdefault(s.tool or "(unknown)", []).append(s)
+    tool_rows = []
     for tool, items in by_tool.items():
-        a = _agg(items)
-        rows.append((tool, a["n"], a["est"], a["actual"], a["saved"],
-                      a["eff"], a["avg_saved"], a["avg_rating"], a["excellent"]))
-    rows.sort(key=lambda r: -r[4])
-    for i, row in enumerate(rows):
+        ta = _agg(items)
+        tool_rows.append((tool, ta["n"], ta["est"], ta["actual"], ta["saved"],
+                          ta["eff"], ta["avg_saved"], ta["avg_rating"], ta["excellent"]))
+    tool_rows.sort(key=lambda r: -r[4])
+    for i, row in enumerate(tool_rows):
         for j, v in enumerate(row, 1):
-            ws.cell(row=hr + 1 + i, column=j, value=v)
+            ws.cell(row=cursor + 1 + i, column=j, value=v)
+    total_r = cursor + 1 + len(tool_rows)
+    _write_total_row(ws, total_r, n_tool, cursor,
+                     sum_cols=[2, 3, 4, 5, 9], avg_cols=[6, 7, 8])
+    _style_data_range(ws, cursor + 1, total_r, n_tool)
+    cursor = total_r + 2
 
-    total_row = hr + 1 + len(rows)
-    _write_total_row(ws, total_row, n_cols, hr, sum_cols=[2, 3, 4, 5, 9], avg_cols=[6, 7, 8])
-    _style_data_range(ws, hr + 1, total_row, n_cols)
-    _set_widths(ws, [24, 10, 12, 12, 14, 12, 16, 10, 10])
-
-
-def build_per_category_sheet(wb: Workbook, sessions: list[Session]) -> None:
-    ws = wb.create_sheet("📂 Per Category")
-    headers = ["Danh Mục", "Số Phiên", "EST (h)", "Actual (h)", "Tiết Kiệm (h)",
-               "Tỷ Lệ Tiết Kiệm %", "TB Tiết Kiệm/Phiên", "Rating TB", "Phiên 5★"]
-    n_cols = len(headers)
-    hr = _title_block(ws, "📂  THỐNG KÊ THEO DANH MỤC", "Sorted by total hours saved", n_cols)
-    for i, h in enumerate(headers, 1):
-        ws.cell(row=hr, column=i, value=h)
-    _style_header(ws, hr, n_cols)
+    # ── By Category ──
+    cat_headers = ["Category"] + metric_headers
+    n_cat = len(cat_headers)
+    _section(ws, cursor, "BY CATEGORY")
+    cursor += 1
+    for i, h in enumerate(cat_headers, 1):
+        ws.cell(row=cursor, column=i, value=h)
+    _style_header(ws, cursor, n_cat)
 
     by_cat: dict[str, list[Session]] = {}
     for s in sessions:
-        key = s.category or "(chưa phân loại)"
-        by_cat.setdefault(key, []).append(s)
-
-    rows = []
+        by_cat.setdefault(s.category or "(uncategorized)", []).append(s)
+    cat_rows = []
     for cat, items in by_cat.items():
-        a = _agg(items)
-        rows.append((cat, a["n"], a["est"], a["actual"], a["saved"],
-                      a["eff"], a["avg_saved"], a["avg_rating"], a["excellent"]))
-    rows.sort(key=lambda r: -r[4])
-    for i, row in enumerate(rows):
+        ca = _agg(items)
+        cat_rows.append((cat, ca["n"], ca["est"], ca["actual"], ca["saved"],
+                         ca["eff"], ca["avg_saved"], ca["avg_rating"], ca["excellent"]))
+    cat_rows.sort(key=lambda r: -r[4])
+    for i, row in enumerate(cat_rows):
         for j, v in enumerate(row, 1):
-            ws.cell(row=hr + 1 + i, column=j, value=v)
+            ws.cell(row=cursor + 1 + i, column=j, value=v)
+    total_r = cursor + 1 + len(cat_rows)
+    _write_total_row(ws, total_r, n_cat, cursor,
+                     sum_cols=[2, 3, 4, 5, 9], avg_cols=[6, 7, 8])
+    _style_data_range(ws, cursor + 1, total_r, n_cat)
+    cursor = total_r + 2
 
-    total_row = hr + 1 + len(rows)
-    _write_total_row(ws, total_row, n_cols, hr, sum_cols=[2, 3, 4, 5, 9], avg_cols=[6, 7, 8])
-    _style_data_range(ws, hr + 1, total_row, n_cols)
-    _set_widths(ws, [24, 10, 12, 12, 14, 12, 16, 10, 10])
+    # ── Rating Distribution ──
+    _section(ws, cursor, "RATING DISTRIBUTION BY TOOL")
+    cursor += 1
+    rating_headers = ["Tool", "1★", "2★", "3★", "4★", "5★", "Total Rated", "Avg Rating"]
+    for i, h in enumerate(rating_headers, 1):
+        ws.cell(row=cursor, column=i, value=h)
+    _style_header(ws, cursor, len(rating_headers))
+    rating_rows = rating_counts_by_tool(sessions)
+    for i, row in enumerate(rating_rows):
+        for j, v in enumerate(row, 1):
+            ws.cell(row=cursor + 1 + i, column=j, value=v)
+    _style_data_range(ws, cursor + 1, cursor + len(rating_rows), len(rating_headers))
+    cursor = cursor + len(rating_rows) + 2
 
-
-def build_time_trend_sheet(wb: Workbook, sessions: list[Session]) -> None:
-    ws = wb.create_sheet("📅 Time Trend")
-    headers = ["Ngày", "Số Phiên", "EST (h)", "Actual (h)", "Tiết Kiệm (h)", "Tỷ Lệ Tiết Kiệm %", "Rating TB"]
-    n_cols = len(headers)
-    hr = _title_block(ws, "📅  XU HƯỚNG THEO NGÀY", "Daily activity across all staff", n_cols)
-    for i, h in enumerate(headers, 1):
-        ws.cell(row=hr, column=i, value=h)
-    _style_header(ws, hr, n_cols)
+    # ── Daily Trend ──
+    _section(ws, cursor, "DAILY TREND")
+    cursor += 1
+    trend_headers = ["Date", "Sessions", "EST (h)", "Actual (h)", "Saved (h)", "Savings %", "Avg Rating"]
+    n_trend = len(trend_headers)
+    for i, h in enumerate(trend_headers, 1):
+        ws.cell(row=cursor, column=i, value=h)
+    _style_header(ws, cursor, n_trend)
 
     by_day: dict[str, list[Session]] = {}
     for s in sessions:
@@ -898,68 +1101,26 @@ def build_time_trend_sheet(wb: Workbook, sessions: list[Session]) -> None:
         except ValueError:
             return datetime.max
 
-    for i, day in enumerate(sorted(by_day.keys(), key=_sort_key)):
-        a = _agg(by_day[day])
-        ws.cell(row=hr + 1 + i, column=1, value=day)
-        ws.cell(row=hr + 1 + i, column=2, value=a["n"])
-        ws.cell(row=hr + 1 + i, column=3, value=a["est"])
-        ws.cell(row=hr + 1 + i, column=4, value=a["actual"])
-        ws.cell(row=hr + 1 + i, column=5, value=a["saved"])
-        ws.cell(row=hr + 1 + i, column=6, value=a["eff"])
-        ws.cell(row=hr + 1 + i, column=7, value=a["avg_rating"])
+    sorted_days = sorted(by_day.keys(), key=_sort_key)
+    for i, day in enumerate(sorted_days):
+        da = _agg(by_day[day])
+        ws.cell(row=cursor + 1 + i, column=1, value=day)
+        ws.cell(row=cursor + 1 + i, column=2, value=da["n"])
+        ws.cell(row=cursor + 1 + i, column=3, value=da["est"])
+        ws.cell(row=cursor + 1 + i, column=4, value=da["actual"])
+        ws.cell(row=cursor + 1 + i, column=5, value=da["saved"])
+        ws.cell(row=cursor + 1 + i, column=6, value=da["eff"])
+        ws.cell(row=cursor + 1 + i, column=7, value=da["avg_rating"])
+    _style_data_range(ws, cursor + 1, cursor + len(sorted_days), n_trend)
 
-    _style_data_range(ws, hr + 1, hr + len(by_day), n_cols)
-    _set_widths(ws, [16, 10, 12, 12, 14, 12, 10])
-
-
-def _build_pivot(wb: Workbook, sheet_name: str, title: str,
-                 sessions: list[Session], col_attr: str) -> None:
-    ws = wb.create_sheet(sheet_name)
-    staff_list = sorted({s.staff for s in sessions})
-    col_values = sorted({getattr(s, col_attr) or "(none)" for s in sessions})
-
-    n_cols = len(col_values) + 2
-    hr = _title_block(ws, title, "Cell = sessions | EST → Actual (saved)", n_cols)
-
-    ws.cell(row=hr, column=1, value="Staff \\ " + col_attr)
-    for i, v in enumerate(col_values, 2):
-        ws.cell(row=hr, column=i, value=v)
-    ws.cell(row=hr, column=n_cols, value="TỔNG")
-    _style_header(ws, hr, n_cols)
-
-    for ri, staff in enumerate(staff_list):
-        ws.cell(row=hr + 1 + ri, column=1, value=staff)
-        staff_total_n = 0
-        staff_total_est = 0.0
-        staff_total_actual = 0.0
-        staff_total_saved = 0.0
-        for ci, v in enumerate(col_values, 2):
-            items = [s for s in sessions
-                     if s.staff == staff and (getattr(s, col_attr) or "(none)") == v]
-            if items:
-                a = _agg(items)
-                ws.cell(row=hr + 1 + ri, column=ci,
-                        value=f"{a['n']} | {a['est']}→{a['actual']} ({a['saved']}h)")
-                staff_total_n += a["n"]
-                staff_total_est += a["est"]
-                staff_total_actual += a["actual"]
-                staff_total_saved += a["saved"]
-            else:
-                ws.cell(row=hr + 1 + ri, column=ci, value="—")
-        ws.cell(row=hr + 1 + ri, column=n_cols,
-                value=f"{staff_total_n} | {staff_total_est:.1f}→{staff_total_actual:.1f} ({staff_total_saved:.1f}h)"
-                ).font = TOTAL_FONT
-
-    _style_data_range(ws, hr + 1, hr + len(staff_list), n_cols)
-    widths = [18] + [28] * len(col_values) + [28]
-    _set_widths(ws, widths)
+    _set_widths(ws, [28, 10, 12, 12, 14, 12, 16, 10, 10, 24])
 
 
 def build_raw_log_sheet(wb: Workbook, sessions: list[Session]) -> None:
     ws = wb.create_sheet("📝 Raw Log")
-    headers = ["Staff", "Ngày", "Tên Phiên", "Công Cụ", "Danh Mục",
-               "Mô Tả", "Rating", "EST (h)", "Actual (h)", "Tiết Kiệm (h)",
-               "Tỷ Lệ Tiết Kiệm %", "Bài Học Người Dùng", "Tags", "Source File"]
+    headers = ["Staff", "Date", "Session Name", "Tool", "Category",
+               "Description", "Rating", "EST (h)", "Actual (h)", "Saved (h)",
+               "Savings %", "User Lesson", "Tags", "Source File"]
     n_cols = len(headers)
     hr = _title_block(ws, "📝  RAW LOG  —  Consolidated Sessions",
                       f"{len(sessions)} rows", n_cols)
@@ -992,14 +1153,14 @@ def build_raw_log_sheet(wb: Workbook, sessions: list[Session]) -> None:
 
 def build_ai_comparison_sheet(wb: Workbook, sessions: list[Session]) -> None:
     ws = wb.create_sheet("🤖 AI Lesson Compare")
-    headers = ["Staff", "Ngày", "Tên Phiên", "Công Cụ",
-               "Mô Tả Nhiệm Vụ", "Prompt Chính", "Kết Quả",
-               "Bài Học Người Dùng", "Bài Học AI Suy Luận", "So Sánh",
-               "User ★", "AI ★", "Δ (AI − User)", "Lý Do AI Chấm",
-               "Prompt Đề Xuất (AI + User Lessons)"]
+    headers = ["Staff", "Date", "Session Name", "Tool",
+               "Task Description", "Main Prompt", "Result",
+               "User Lesson", "AI Inferred Lesson", "Comparison",
+               "User ★", "AI ★", "Δ (AI − User)", "AI Rating Reason",
+               "Suggested Prompt"]
     n_cols = len(headers)
     hr = _title_block(ws,
-                      "🤖  SO SÁNH BÀI HỌC & ĐỀ XUẤT PROMPT  —  AI vs Người Dùng",
+                      "🤖  LESSON COMPARISON & PROMPT SUGGESTIONS  —  AI vs User",
                       "AI infers lesson, rates output (1–5), and suggests an improved prompt",
                       n_cols)
     for i, h in enumerate(headers, 1):
@@ -1007,10 +1168,10 @@ def build_ai_comparison_sheet(wb: Workbook, sessions: list[Session]) -> None:
     _style_header(ws, hr, n_cols)
 
     comparison_fills = {
-        "Đồng thuận": PatternFill("solid", start_color="C6EFCE"),
-        "Bổ sung": PatternFill("solid", start_color="FFEB9C"),
-        "Khác biệt": PatternFill("solid", start_color="FFC7CE"),
-        "Người dùng để trống": PatternFill("solid", start_color="D9D9D9"),
+        "Agree": PatternFill("solid", start_color="C6EFCE"),
+        "Supplement": PatternFill("solid", start_color="FFEB9C"),
+        "Disagree": PatternFill("solid", start_color="FFC7CE"),
+        "User left blank": PatternFill("solid", start_color="D9D9D9"),
     }
     gap_green = PatternFill("solid", start_color="C6EFCE")
     gap_red = PatternFill("solid", start_color="FFC7CE")
@@ -1025,7 +1186,7 @@ def build_ai_comparison_sheet(wb: Workbook, sessions: list[Session]) -> None:
         ws.cell(row=r, column=5, value=s.task_desc or "—")
         ws.cell(row=r, column=6, value=s.prompt or "—")
         ws.cell(row=r, column=7, value=s.result or "—")
-        ws.cell(row=r, column=8, value=s.user_lesson or "(trống)")
+        ws.cell(row=r, column=8, value=s.user_lesson or "(empty)")
         ws.cell(row=r, column=9, value=s.ai_lesson or "—")
         comp_cell = ws.cell(row=r, column=10, value=s.comparison or "—")
         if s.comparison in comparison_fills:
@@ -1063,13 +1224,7 @@ def build_ai_comparison_sheet(wb: Workbook, sessions: list[Session]) -> None:
 def build_report(sessions: list[Session], with_ai: bool) -> Workbook:
     wb = Workbook()
     wb.remove(wb.active)
-    build_summary_sheet(wb, sessions)
-    build_per_staff_sheet(wb, sessions)
-    build_per_tool_sheet(wb, sessions)
-    build_per_category_sheet(wb, sessions)
-    build_time_trend_sheet(wb, sessions)
-    _build_pivot(wb, "🔀 Pivot Staff×Tool", "🔀  PIVOT  —  Staff × Công Cụ", sessions, "tool")
-    _build_pivot(wb, "🔀 Pivot Staff×Cat", "🔀  PIVOT  —  Staff × Danh Mục", sessions, "category")
+    build_dashboard_sheet(wb, sessions)
     build_raw_log_sheet(wb, sessions)
     if with_ai:
         build_ai_comparison_sheet(wb, sessions)
@@ -1091,20 +1246,20 @@ def build_classifier_prompt(sessions: list[Session], error_taxonomy: dict[str, s
             "title": _truncate(s.title, 220), "tool": s.tool,
             "category": s.category, "task_description": _truncate(s.task_desc),
             "user_prompt": _truncate(s.prompt), "ai_result": _truncate(s.result),
-            "user_lesson": _truncate(s.user_lesson, 700) or "(trống)",
-            "ai_inferred_lesson": _truncate(s.ai_lesson, 900) or "(trống)",
+            "user_lesson": _truncate(s.user_lesson, 700) or "(empty)",
+            "ai_inferred_lesson": _truncate(s.ai_lesson, 900) or "(empty)",
         }
         for s in sessions
     ]
 
     return f"""<role>
-Bạn là chuyên gia prompt engineering và phân tích quy trình phát triển phần mềm.
-Bạn phân loại nhật ký dùng AI của developer để tạo chart quản trị: lỗi prompt thường gặp và loại công việc theo SDLC.
+You are an expert in prompt engineering and software development process analysis.
+You classify developer AI journal entries to create management charts: common prompt errors and SDLC work types.
 </role>
 
 <context>
-Input là các phiên làm việc từ AI Dev Journal. Mỗi phiên có bài học người dùng tự ghi và bài học AI suy luận.
-Mục tiêu là phân loại chính xác lỗi mà từng người dùng gặp phải, ưu tiên taxonomy cố định, chỉ tạo nhãn mới khi không có nhãn hiện tại nào phù hợp.
+Input consists of work sessions from an AI Dev Journal. Each session has a user-written lesson and an AI-inferred lesson.
+The goal is to accurately classify the errors each user encountered, prioritizing the fixed taxonomy, and only creating new labels when no existing label fits.
 </context>
 
 <fixed_error_taxonomy>
@@ -1122,69 +1277,56 @@ Mục tiêu là phân loại chính xác lỗi mà từng người dùng gặp p
 <examples>
   <example>
     <input>
-      {{"id":"S_EXAMPLE","task_description":"Nhờ AI sửa format bảng Excel nhưng output sai cột","user_lesson":"Cần nói rõ format mong muốn","ai_inferred_lesson":"Prompt thiếu schema output và constraint về cột"}}
+      {{"id":"S_EXAMPLE","task_description":"Asked AI to fix Excel table format but output had wrong columns","user_lesson":"Need to specify expected format clearly","ai_inferred_lesson":"Prompt lacked output schema and column constraints"}}
     </input>
     <output>
-      {{"id":"S_EXAMPLE","error_labels":["Clear and Format"],"new_error_labels":[],"error_evidence":"Cả user_lesson và ai_inferred_lesson đều nói thiếu format/schema output.","sdlc_category":"Development / Implementation","sdlc_confidence":0.82,"sdlc_reason":"Task yêu cầu AI sửa format trong file/script hiện có."}}
+      {{"id":"S_EXAMPLE","error_labels":["Clear and Format"],"new_error_labels":[],"error_evidence":"Both user_lesson and ai_inferred_lesson indicate missing format/schema output.","sdlc_category":"Development / Implementation","sdlc_confidence":0.82,"sdlc_reason":"Task involves AI fixing format in an existing file/script."}}
     </output>
   </example>
 </examples>
 
 <instructions>
-Thực hiện chính xác các bước sau:
-1. Với mỗi session trong <journal_sessions>, đọc task_description, user_prompt, ai_result, user_lesson, và ai_inferred_lesson.
-2. Gán 1 đến {MAX_LABELS_PER_SESSION} `error_labels` cho lỗi prompt mà người dùng gặp phải:
-   - Ưu tiên chọn nhãn trong <fixed_error_taxonomy>.
-   - Chỉ thêm nhãn mới nếu không có nhãn cố định nào mô tả đúng lỗi chính.
-   - Nếu bài học không đủ dữ liệu, dùng "Insufficient Lesson Data".
-3. Gán chính xác một `sdlc_category` từ <fixed_sdlc_taxonomy> cho task của session.
-4. Viết `error_evidence` và `sdlc_reason` ngắn gọn bằng tiếng Việt.
-5. Trả về kết quả cho mọi session, giữ nguyên `id`.
+Follow these steps exactly:
+1. For each session in <journal_sessions>, read task_description, user_prompt, ai_result, user_lesson, and ai_inferred_lesson.
+2. Assign 1 to {MAX_LABELS_PER_SESSION} `error_labels` for prompt errors the user encountered:
+   - Prioritize labels from <fixed_error_taxonomy>.
+   - Only add new labels if no fixed label accurately describes the main error.
+   - If lesson data is insufficient, use "Insufficient Lesson Data".
+3. Assign exactly one `sdlc_category` from <fixed_sdlc_taxonomy> for the session's task.
+4. Write `error_evidence` and `sdlc_reason` concisely in English, based on evidence in the input.
+5. Return results for ALL sessions, preserving the `id`.
 </instructions>
 
 <output_format>
-Trả về DUY NHẤT một JSON object hợp lệ, không markdown:
+Return ONLY a single valid JSON object, no markdown:
 {{
   "sessions": [
     {{
       "id": "S1",
       "error_labels": ["Clear and Format"],
       "new_error_labels": [],
-      "error_evidence": "Lý do ngắn bằng tiếng Việt",
+      "error_evidence": "Brief reason in English",
       "sdlc_category": "Development / Implementation",
       "sdlc_confidence": 0.0,
-      "sdlc_reason": "Lý do ngắn bằng tiếng Việt"
+      "sdlc_reason": "Brief reason in English"
     }}
   ],
   "new_taxonomy": [
-    {{"label": "New Label", "definition": "Định nghĩa ngắn"}}
+    {{"label": "New Label", "definition": "Short definition"}}
   ]
 }}
 </output_format>
 
-Trước khi trả lời, hãy tự kiểm tra:
-- Mỗi session input đều có đúng một object output.
-- Mọi `sdlc_category` nằm trong fixed_sdlc_taxonomy.
-- `error_labels` có tối đa {MAX_LABELS_PER_SESSION} nhãn.
-- JSON hợp lệ và không có giải thích ngoài JSON.
+Before responding, self-check:
+- Every input session has exactly one output object.
+- All `sdlc_category` values are from fixed_sdlc_taxonomy.
+- `error_labels` has at most {MAX_LABELS_PER_SESSION} labels.
+- JSON is valid with no explanation outside JSON.
 """
 
 
-def _parse_json_object(raw: str) -> dict[str, Any]:
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", (raw or "").strip(), flags=re.MULTILINE)
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            return parsed
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-    if not match:
-        raise ValueError("Model response did not contain a JSON object")
-    parsed = json.loads(match.group(0))
-    if not isinstance(parsed, dict):
-        raise ValueError("Model response JSON root was not an object")
-    return parsed
+
+
 
 
 def _coerce_labels(raw: Any, taxonomy: dict[str, str]) -> list[str]:
@@ -1359,31 +1501,13 @@ def _bar_xl_chart(ws, title: str, min_row: int, max_row: int, min_col: int,
     ws.add_chart(chart, anchor)
 
 
-def _line_xl_chart(ws, title: str, min_row: int, max_row: int, min_col: int,
-                   max_col: int, category_col: int, anchor: str, y_title: str = "Value") -> None:
-    if max_row <= min_row:
-        return
-    chart = LineChart()
-    chart.style = 13
-    chart.title = title
-    chart.y_axis.title = y_title
-    chart.x_axis.title = ws.cell(row=min_row, column=category_col).value
-    data = Reference(ws, min_col=min_col, max_col=max_col, min_row=min_row, max_row=max_row)
-    cats = Reference(ws, min_col=category_col, min_row=min_row + 1, max_row=max_row)
-    chart.add_data(data, titles_from_data=True)
-    chart.set_categories(cats)
-    chart.height = 9
-    chart.width = 18
-    ws.add_chart(chart, anchor)
-
-
 # --- Rating helpers ---
 
 def rating_counts_by_tool(sessions: list[Session]) -> list[list[Any]]:
-    tools = sorted({s.tool or "(không rõ)" for s in sessions})
+    tools = sorted({s.tool or "(unknown)" for s in sessions})
     rows: list[list[Any]] = []
     for tool in tools:
-        items = [s for s in sessions if (s.tool or "(không rõ)") == tool]
+        items = [s for s in sessions if (s.tool or "(unknown)") == tool]
         counts = Counter()
         ratings: list[float] = []
         for s in items:
@@ -1489,65 +1613,14 @@ def sdlc_task_detail_rows(sessions: list[Session]) -> list[list[Any]]:
 
 # --- Sheet builders ---
 
-def build_efficiency_sheet(wb, sessions: list[Session]) -> None:
-    ws = wb.create_sheet(EFFICIENCY_SHEET)
-    row = _xl_title(ws, 1, "📈 EST vs Actual — Time Saved",
-                    "Compare estimated hours without AI and actual hours with AI.", 7)
-
-    headers = ["Group", "Sessions", "EST (h)", "Actual (h)", "Saved (h)", "Time Saved %"]
-
-    row = _section_label(ws, row, "Overall")
-    overall = aggregate_sessions(sessions)
-    overall_start = row
-    overall_end, _ = _write_xl_table(ws, row, 1, headers, [["Overall",
-        overall["sessions"], overall["est"], overall["actual"], overall["saved"], overall["efficiency"]]])
-    _bar_xl_chart(ws, "Overall EST vs Actual", overall_start, overall_end, 3, 4, 1, "H4", y_title="Hours")
-    row = overall_end + 3
-
-    sections = [
-        ("By Staff", group_aggregate(sessions, "staff"), "H20"),
-        ("By Tool", group_aggregate(sessions, "tool"), "H36"),
-        ("By Category", group_aggregate(sessions, "category"), "H52"),
-    ]
-    for label, data, anchor in sections:
-        row = _section_label(ws, row, label)
-        table_rows = [[k, ag["sessions"], ag["est"], ag["actual"], ag["saved"], ag["efficiency"]]
-                      for k, ag in data]
-        start = row
-        end, _ = _write_xl_table(ws, row, 1, headers, table_rows)
-        _bar_xl_chart(ws, f"{label}: EST vs Actual", start, end, 3, 4, 1, anchor, y_title="Hours")
-        row = end + 3
-
-    row = _section_label(ws, row, "Over Time")
-    table_rows = [[k, ag["sessions"], ag["est"], ag["actual"], ag["saved"], ag["efficiency"]]
-                  for k, ag in date_aggregate(sessions)]
-    start = row
-    end, _ = _write_xl_table(ws, row, 1, headers, table_rows)
-    _line_xl_chart(ws, "Over Time: EST vs Actual", start, end, 3, 4, 1, "H68", y_title="Hours")
-    _set_widths(ws, [24, 10, 12, 12, 12, 14, 4, 20, 20, 20])
-    ws.freeze_panes = "A4"
-
-
-def build_rating_sheet(wb, sessions: list[Session]) -> None:
-    ws = wb.create_sheet(RATING_SHEET)
-    header_row = _xl_title(ws, 1, "⭐ User Satisfaction by Tool",
-                           "Count of 1★–5★ ratings per AI tool.", 8)
-    headers = ["Tool", "1★", "2★", "3★", "4★", "5★", "Total Rated", "Avg Rating"]
-    rows = rating_counts_by_tool(sessions)
-    end_row, _ = _write_xl_table(ws, header_row, 1, headers, rows)
-    _bar_xl_chart(ws, "Rating Counts per Tool", header_row, end_row, 2, 6, 1, "J4",
-                  y_title="Sessions", stacked=True)
-    _set_widths(ws, [24, 8, 8, 8, 8, 8, 12, 12])
-    ws.freeze_panes = "A4"
-
 
 def build_error_data_sheet(wb, sessions: list[Session]) -> None:
     ws = wb.create_sheet(ERROR_DATA_SHEET)
     row = _xl_title(ws, 1, "🏷️ Prompt Error Classification Data",
                     "Multi-label error classification from user lesson + AI inferred lesson.", 12)
 
-    headers = ["Staff", "Ngày", "Tên Phiên", "Công Cụ", "Danh Mục", "Mô Tả",
-               "Bài Học Người Dùng", "Bài Học AI Suy Luận", "Error Labels", "Evidence", "Source File"]
+    headers = ["Staff", "Date", "Session Name", "Tool", "Category", "Description",
+               "User Lesson", "AI Inferred Lesson", "Error Labels", "Evidence", "Source File"]
     rows = [[s.staff, _fmt_date(s.date), s.title, s.tool, s.category, s.task_desc,
              s.user_lesson, s.ai_lesson,
              ", ".join(s.error_labels or ["Unclassified"]), s.error_evidence, s.source_file]
@@ -1567,9 +1640,9 @@ def build_error_chart_sheet(wb, sessions: list[Session]) -> None:
     labels, counts = collapsed_error_labels(sessions)
     row = _section_label(ws, row, "Top Error Labels", n_cols=4)
     top_start = row
-    top_rows = [[l, counts[l]] for l in labels]
-    top_end, _ = _write_xl_table(ws, row, 1, ["Error Label", "Count"], top_rows)
-    _bar_xl_chart(ws, "Top Prompt Errors", top_start, top_end, 2, 2, 1, "E4", y_title="Occurrences")
+    top_rows = [[l, counts[l], ERROR_TAXONOMY.get(l, "")] for l in labels]
+    top_end, _ = _write_xl_table(ws, row, 1, ["Error Label", "Count", "Description"], top_rows)
+    _bar_xl_chart(ws, "Top Prompt Errors", top_start, top_end, 2, 2, 1, "F4", y_title="Occurrences")
     row = top_end + 3
 
     staff_list, matrix_rows = error_staff_matrix(sessions, labels)
@@ -1579,7 +1652,7 @@ def build_error_chart_sheet(wb, sessions: list[Session]) -> None:
     if staff_list:
         _bar_xl_chart(ws, "Prompt Errors by Staff", matrix_start, matrix_end,
                       2, len(staff_list) + 1, 1, "E22", y_title="Occurrences")
-    _set_widths(ws, [28, 12, *([12] * len(staff_list))])
+    _set_widths(ws, [28, 12, 60, *([12] * len(staff_list))])
     ws.freeze_panes = "A4"
 
 
@@ -1653,7 +1726,7 @@ def build_sdlc_sheet(wb, sessions: list[Session]) -> None:
     detail_row = _section_label(ws, detail_row, "All Task Details by SDLC Stage", n_cols=8)
     detail_start = detail_row
     detail_end, _ = _write_xl_table(ws, detail_row, 1,
-        ["SDLC Stage", "Task Name", "Staff", "Ngày", "EST (h)", "Actual (h)", "Saved (h)", "Efficiency %"],
+        ["SDLC Stage", "Task Name", "Staff", "Date", "EST (h)", "Actual (h)", "Saved (h)", "Efficiency %"],
         detail_rows)
 
     widths = [30, *([18] * len(task_names))]
@@ -1702,9 +1775,9 @@ def _looks_like_header(values: list[str]) -> bool:
         return False
     normalized = {v.casefold() for v in nonempty}
     header_markers = {
-        "staff", "ngày", "tên phiên", "công cụ", "công cụ ai",
-        "danh mục", "group", "sessions", "sdlc stage", "task name",
-        "error label", "tool", "chỉ số", "giá trị", "rating",
+        "staff", "date", "session name", "tool", "ai tool",
+        "category", "group", "sessions", "sdlc stage", "task name",
+        "error label", "metric", "value", "rating", "description",
     }
     return bool(normalized & header_markers)
 
@@ -1736,13 +1809,13 @@ def _format_numeric_columns(ws, header_row: int, max_col: int, end_row: int) -> 
         header = str(ws.cell(row=header_row, column=col).value or "")
         hcf = header.casefold()
         number_format: str | None = None
-        if "%" in header or "tỷ lệ" in hcf or "eff" in hcf:
+        if "%" in header or "savings" in hcf or "eff" in hcf:
             number_format = "0.0"
-        elif "(h)" in hcf or "saved" in hcf or "tiết kiệm" in hcf or "actual" in hcf or "est" in hcf:
+        elif "(h)" in hcf or "saved" in hcf or "actual" in hcf or "est" in hcf:
             number_format = "0.0"
         elif "rating" in hcf or "★" in header:
             number_format = "0.0"
-        elif "phiên" in hcf or "sessions" in hcf or "count" in hcf:
+        elif "sessions" in hcf or "count" in hcf:
             number_format = "0"
         if not number_format:
             continue
@@ -1757,7 +1830,7 @@ def _add_color_scale(ws, header_row: int, max_col: int, end_row: int) -> None:
         return
     for col in range(1, max_col + 1):
         header = str(ws.cell(row=header_row, column=col).value or "").casefold()
-        if not any(m in header for m in ["%", "tỷ lệ", "eff", "rating", "saved", "tiết kiệm"]):
+        if not any(m in header for m in ["%", "savings", "eff", "rating", "saved"]):
             continue
         if not any(isinstance(ws.cell(row=r, column=col).value, (int, float))
                    for r in range(header_row + 1, end_row + 1)):
@@ -1776,7 +1849,7 @@ def _shade_body_rows(ws, header_row: int, max_col: int, end_row: int) -> None:
     if ws.title in {AI_COMPARE_SHEET, ERROR_DATA_SHEET}:
         return
     for r in range(header_row + 1, end_row + 1):
-        if str(ws.cell(row=r, column=1).value or "").upper().startswith("TỔNG"):
+        if str(ws.cell(row=r, column=1).value or "").upper().startswith(("TOTAL", "TỔNG")):
             continue
         if (r - header_row) % 2 == 0:
             for col in range(1, max_col + 1):
@@ -1787,8 +1860,8 @@ def _shade_body_rows(ws, header_row: int, max_col: int, end_row: int) -> None:
 
 def _set_professional_filter(ws) -> None:
     filter_sheet_names = {
-        "👤 Per Staff", "🔧 Per Tool", "📂 Per Category", "📅 Time Trend",
-        "📝 Raw Log", AI_COMPARE_SHEET, ERROR_DATA_SHEET, RATING_SHEET,
+        "📊 Dashboard",
+        "📝 Raw Log", AI_COMPARE_SHEET, ERROR_DATA_SHEET,
     }
     if ws.title == SDLC_SHEET:
         for row in range(1, ws.max_row + 1):
@@ -1857,11 +1930,10 @@ def _polish_sheet(ws) -> None:
 
 def polish_workbook(wb) -> None:
     tab_colors = {
-        SDLC_SHEET: PROFESSIONAL_TEAL, EFFICIENCY_SHEET: PROFESSIONAL_BLUE,
-        RATING_SHEET: PROFESSIONAL_ORANGE, ERROR_CHART_SHEET: "C00000",
-        ERROR_DATA_SHEET: "C00000", "📊 Tổng Quan": PROFESSIONAL_NAVY,
-        "👤 Per Staff": PROFESSIONAL_BLUE, "🔧 Per Tool": "5B9BD5",
-        "📂 Per Category": "70AD47", "📅 Time Trend": "8064A2",
+        SDLC_SHEET: PROFESSIONAL_TEAL,
+        ERROR_CHART_SHEET: "C00000",
+        ERROR_DATA_SHEET: "C00000",
+        "📊 Dashboard": PROFESSIONAL_BLUE,
         "📝 Raw Log": "7F7F7F", AI_COMPARE_SHEET: "FFC000",
     }
     for ws in wb.worksheets:
@@ -1876,12 +1948,10 @@ def add_chart_sheets(wb, sessions: list[Session]) -> None:
             del wb[name]
 
     build_sdlc_sheet(wb, sessions)
-    build_efficiency_sheet(wb, sessions)
-    build_rating_sheet(wb, sessions)
     build_error_data_sheet(wb, sessions)
     build_error_chart_sheet(wb, sessions)
 
-    generated_front_order = [SDLC_SHEET, EFFICIENCY_SHEET, RATING_SHEET, ERROR_CHART_SHEET]
+    generated_front_order = [SDLC_SHEET, ERROR_CHART_SHEET]
     for target_index, sheet_name in enumerate(generated_front_order):
         ws = wb[sheet_name]
         current_index = wb._sheets.index(ws)
@@ -1939,55 +2009,55 @@ def _build_chart_data(sessions: list[Session]) -> dict[str, Any]:
     for staff, items in by_staff.items():
         a = _agg(items)
         per_staff.append({
-            "Staff": staff, "Số Phiên": a["n"], "EST (h)": a["est"],
-            "Actual (h)": a["actual"], "Tiết Kiệm (h)": a["saved"],
-            "Tỷ Lệ Tiết Kiệm %": a["eff"], "Rating TB": a["avg_rating"],
+            "Staff": staff, "Sessions": a["n"], "EST (h)": a["est"],
+            "Actual (h)": a["actual"], "Saved (h)": a["saved"],
+            "Savings %": a["eff"], "Avg Rating": a["avg_rating"],
         })
-    per_staff.sort(key=lambda r: -r["Tiết Kiệm (h)"])
+    per_staff.sort(key=lambda r: -r["Saved (h)"])
     data["per_staff"] = per_staff
 
     # Per Tool
     by_tool: dict[str, list[Session]] = {}
     for s in sessions:
-        by_tool.setdefault(s.tool or "(không rõ)", []).append(s)
+        by_tool.setdefault(s.tool or "(unknown)", []).append(s)
     per_tool = []
     for tool, items in by_tool.items():
         a = _agg(items)
         per_tool.append({
-            "Công Cụ AI": tool, "Số Phiên": a["n"], "EST (h)": a["est"],
-            "Actual (h)": a["actual"], "Tiết Kiệm (h)": a["saved"],
-            "Tỷ Lệ Tiết Kiệm %": a["eff"],
+            "AI Tool": tool, "Sessions": a["n"], "EST (h)": a["est"],
+            "Actual (h)": a["actual"], "Saved (h)": a["saved"],
+            "Savings %": a["eff"],
         })
-    per_tool.sort(key=lambda r: -r["Tiết Kiệm (h)"])
+    per_tool.sort(key=lambda r: -r["Saved (h)"])
     data["per_tool"] = per_tool
 
     # Per Category
     by_cat: dict[str, list[Session]] = {}
     for s in sessions:
-        by_cat.setdefault(s.category or "(chưa phân loại)", []).append(s)
+        by_cat.setdefault(s.category or "(uncategorized)", []).append(s)
     per_cat = []
     for cat, items in by_cat.items():
         a = _agg(items)
         per_cat.append({
-            "Danh Mục": cat, "Số Phiên": a["n"], "EST (h)": a["est"],
-            "Actual (h)": a["actual"], "Tiết Kiệm (h)": a["saved"],
-            "Tỷ Lệ Tiết Kiệm %": a["eff"],
+            "Category": cat, "Sessions": a["n"], "EST (h)": a["est"],
+            "Actual (h)": a["actual"], "Saved (h)": a["saved"],
+            "Savings %": a["eff"],
         })
-    per_cat.sort(key=lambda r: -r["Tiết Kiệm (h)"])
+    per_cat.sort(key=lambda r: -r["Saved (h)"])
     data["per_category"] = per_cat
 
     # KPIs
     a = _agg(sessions)
     n_staff = len({s.staff for s in sessions})
     data["kpis"] = {
-        "Tổng số phiên": a["n"], "Số staff": n_staff,
-        "Tổng EST (không AI)": f"{a['est']}h", "Tổng Actual (có AI)": f"{a['actual']}h",
-        "Tổng giờ tiết kiệm": f"{a['saved']}h",
-        "Tỷ lệ thời gian tiết kiệm": f"{a['eff']}%",
+        "Total Sessions": a["n"], "Staff Count": n_staff,
+        "Total EST (No AI)": f"{a['est']}h", "Total Actual (With AI)": f"{a['actual']}h",
+        "Total Hours Saved": f"{a['saved']}h",
+        "Time Savings %": f"{a['eff']}%",
     }
 
     # Raw log for rating distribution
-    data["raw_log"] = [{"Công Cụ": s.tool, "Rating": s.rating} for s in sessions]
+    data["raw_log"] = [{"Tool": s.tool, "Rating": s.rating} for s in sessions]
 
     return data
 
@@ -1996,8 +2066,8 @@ def _bar_est_actual(ax, labels: list[str], est: list[float],
                     actual: list[float], saved: list[float]) -> None:
     y = np.arange(len(labels))
     h = 0.35
-    ax.barh(y + h / 2, est, h, label="EST (Không AI)", color=ORANGE, alpha=0.85)
-    ax.barh(y - h / 2, actual, h, label="Actual (Có AI)", color=BLUE, alpha=0.85)
+    ax.barh(y + h / 2, est, h, label="EST (No AI)", color=ORANGE, alpha=0.85)
+    ax.barh(y - h / 2, actual, h, label="Actual (With AI)", color=BLUE, alpha=0.85)
 
     max_val = max(est) if est else 1
     for i in range(len(labels)):
@@ -2011,7 +2081,7 @@ def _bar_est_actual(ax, labels: list[str], est: list[float],
 
     ax.set_yticks(y)
     ax.set_yticklabels(labels)
-    ax.set_xlabel("Giờ (hours)")
+    ax.set_xlabel("Hours")
     ax.legend(loc="lower right")
     ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
     ax.grid(axis="x", alpha=0.3)
@@ -2024,7 +2094,7 @@ def _chart_efficiency_view(rows, label_col, title, filename, pdf, out_dir) -> No
     labels = [str(r.get(label_col, ""))[:25] for r in rows]
     est = [float(r.get("EST (h)", 0) or 0) for r in rows]
     actual = [float(r.get("Actual (h)", 0) or 0) for r in rows]
-    saved = [float(r.get("Tiết Kiệm (h)", 0) or 0) for r in rows]
+    saved = [float(r.get("Saved (h)", 0) or 0) for r in rows]
 
     fig_h = max(4.5, 1.2 * len(labels) + 2)
     fig, ax = plt.subplots(figsize=(12, fig_h))
@@ -2034,7 +2104,7 @@ def _chart_efficiency_view(rows, label_col, title, filename, pdf, out_dir) -> No
     total_saved = sum(saved)
     total_est = sum(est)
     eff = (total_saved / total_est * 100) if total_est else 0
-    ax.set_title(f"Tổng tiết kiệm: {total_saved:.1f}h / {total_est:.1f}h ({eff:.0f}%)",
+    ax.set_title(f"Total saved: {total_saved:.1f}h / {total_est:.1f}h ({eff:.0f}%)",
                  fontsize=11, color=GRAY, pad=10)
     _save_chart(fig, pdf, out_dir, filename)
 
@@ -2049,12 +2119,12 @@ def chart_kpi_summary(data: dict, pdf: PdfPages, out_dir: Path) -> None:
              fontsize=22, fontweight="bold", color=NAVY, ha="center")
 
     boxes = [
-        ("Tổng Phiên", str(kpis.get("Tổng số phiên", "—")), BLUE),
-        ("Số Staff", str(kpis.get("Số staff", "—")), TEAL),
-        ("EST (Không AI)", str(kpis.get("Tổng EST (không AI)", "—")), ORANGE),
-        ("Actual (Có AI)", str(kpis.get("Tổng Actual (có AI)", "—")), GREEN),
-        ("Giờ Tiết Kiệm", str(kpis.get("Tổng giờ tiết kiệm", "—")), NAVY),
-        ("Hiệu Suất AI", str(_first_present(kpis, "Hiệu suất AI", "Tỷ lệ thời gian tiết kiệm")), RED),
+        ("Total Sessions", str(kpis.get("Total Sessions", "—")), BLUE),
+        ("Staff Count", str(kpis.get("Staff Count", "—")), TEAL),
+        ("EST (No AI)", str(kpis.get("Total EST (No AI)", "—")), ORANGE),
+        ("Actual (With AI)", str(kpis.get("Total Actual (With AI)", "—")), GREEN),
+        ("Hours Saved", str(kpis.get("Total Hours Saved", "—")), NAVY),
+        ("AI Efficiency", str(kpis.get("Time Savings %", "—")), RED),
     ]
     for i, (label, value, color) in enumerate(boxes):
         col = i % 3
@@ -2075,15 +2145,15 @@ def chart_kpi_summary(data: dict, pdf: PdfPages, out_dir: Path) -> None:
         table_y = 0.18
         fig.text(0.5, table_y + 0.06, "Ranking by Time Saved",
                  fontsize=11, fontweight="bold", color=NAVY, ha="center")
-        header = f"{'Staff':<16} {'Phiên':>6} {'EST':>8} {'Actual':>8} {'Saved':>8} {'Eff%':>7}"
+        header = f"{'Staff':<16} {'Sess':>6} {'EST':>8} {'Actual':>8} {'Saved':>8} {'Eff%':>7}"
         fig.text(0.18, table_y, header, fontsize=9, fontfamily="monospace",
                  color=NAVY, fontweight="bold")
         for j, row in enumerate(per_staff[:6]):
             name = str(row.get("Staff", ""))[:14]
-            eff = _first_present(row, "Hiệu Suất %", "Tỷ Lệ Tiết Kiệm %", default=0)
-            line = (f"{name:<16} {row.get('Số Phiên', 0):>6} "
+            eff = _first_present(row, "Savings %", default=0)
+            line = (f"{name:<16} {row.get('Sessions', 0):>6} "
                     f"{row.get('EST (h)', 0):>7}h {row.get('Actual (h)', 0):>7}h "
-                    f"{row.get('Tiết Kiệm (h)', 0):>7}h {eff:>6}%")
+                    f"{row.get('Saved (h)', 0):>7}h {eff:>6}%")
             fig.text(0.18, table_y - 0.035 * (j + 1), line, fontsize=8.5,
                      fontfamily="monospace", color=GRAY)
     _save_chart(fig, pdf, out_dir, "03_kpi_summary")
@@ -2097,8 +2167,8 @@ def chart_staff_effectiveness(data: dict, pdf: PdfPages, out_dir: Path) -> None:
 
 def chart_efficiency(data: dict, pdf: PdfPages, out_dir: Path) -> None:
     views = [
-        ("per_tool", "Công Cụ AI", "EST vs Actual — Theo Công Cụ AI", "04_est_actual_tool"),
-        ("per_category", "Danh Mục", "EST vs Actual — Theo Danh Mục", "05_est_actual_category"),
+        ("per_tool", "AI Tool", "EST vs Actual — By AI Tool", "04_est_actual_tool"),
+        ("per_category", "Category", "EST vs Actual — By Category", "05_est_actual_category"),
     ]
     for key, label_col, title, filename in views:
         _chart_efficiency_view(data.get(key, []), label_col, title, filename, pdf, out_dir)
@@ -2111,7 +2181,7 @@ def chart_rating(data: dict, pdf: PdfPages, out_dir: Path) -> None:
 
     tool_ratings: dict[str, Counter] = defaultdict(Counter)
     for row in raw:
-        tool = str(row.get("Công Cụ") or "(không rõ)")
+        tool = str(row.get("Tool") or "(unknown)")
         rating = row.get("Rating")
         if rating is not None:
             try:
@@ -2147,7 +2217,7 @@ def chart_rating(data: dict, pdf: PdfPages, out_dir: Path) -> None:
 
     ax1.set_yticks(y)
     ax1.set_yticklabels(tools)
-    ax1.set_xlabel("Số phiên")
+    ax1.set_xlabel("Sessions")
     ax1.legend(loc="lower right", ncol=5)
     ax1.grid(axis="x", alpha=0.3)
     ax1.invert_yaxis()
@@ -2166,13 +2236,13 @@ def chart_rating(data: dict, pdf: PdfPages, out_dir: Path) -> None:
         ax2.text(v + 0.05, y[i], f"{v:.1f}/5", va="center", fontsize=10,
                  fontweight="bold", color=colors[i])
     ax2.set_xlim(0, 5.5)
-    ax2.set_xlabel("Rating trung bình")
+    ax2.set_xlabel("Average Rating")
     ax2.set_yticks(y)
     ax2.set_yticklabels([""] * len(tools))
     ax2.axvline(x=4, color=GREEN, linestyle="--", alpha=0.4, linewidth=1)
     ax2.grid(axis="x", alpha=0.3)
     ax2.invert_yaxis()
-    ax2.set_title("Trung Bình", fontsize=11, color=GRAY)
+    ax2.set_title("Average", fontsize=11, color=GRAY)
     _save_chart(fig, pdf, out_dir, "06_rating_distribution")
 
 
@@ -2194,7 +2264,7 @@ def chart_errors_from_sessions(sessions: list[Session], pdf: PdfPages, out_dir: 
     counts = [c for _, c in top_labels]
 
     fig, ax = plt.subplots(figsize=(12, max(5, len(labels) * 0.7 + 2)))
-    fig.suptitle("Top Lỗi Prompt — Phân Loại Theo Best Practices",
+    fig.suptitle("Top Prompt Errors — Classified by Best Practices",
                  fontsize=16, fontweight="bold", color=NAVY, y=0.98)
 
     y = np.arange(len(labels))
@@ -2206,11 +2276,11 @@ def chart_errors_from_sessions(sessions: list[Session], pdf: PdfPages, out_dir: 
                 fontsize=10, fontweight="bold", color=NAVY)
     ax.set_yticks(y)
     ax.set_yticklabels(labels, fontsize=10)
-    ax.set_xlabel("Số lần xuất hiện")
+    ax.set_xlabel("Occurrences")
     ax.grid(axis="x", alpha=0.3)
     ax.invert_yaxis()
     n_sessions_with_errors = sum(1 for s in sessions if s.error_labels)
-    ax.set_title(f"Tổng {sum(counts)} lỗi từ {n_sessions_with_errors} phiên",
+    ax.set_title(f"Total {sum(counts)} errors from {n_sessions_with_errors} sessions",
                  fontsize=11, color=GRAY, pad=10)
     _save_chart(fig, pdf, out_dir, "07_top_errors")
 
@@ -2226,7 +2296,7 @@ def chart_errors_from_sessions(sessions: list[Session], pdf: PdfPages, out_dir: 
 
     fig, ax = plt.subplots(figsize=(max(10, len(labels) * 1.2 + 2),
                                     max(4, len(staff_list) * 0.8 + 2.5)))
-    fig.suptitle("Phân Bố Lỗi Prompt Theo Staff",
+    fig.suptitle("Prompt Error Distribution by Staff",
                  fontsize=16, fontweight="bold", color=NAVY, y=0.98)
     im = ax.imshow(matrix, cmap="Blues", aspect="auto", vmin=0)
     ax.set_xticks(np.arange(len(labels)))
@@ -2243,8 +2313,8 @@ def chart_errors_from_sessions(sessions: list[Session], pdf: PdfPages, out_dir: 
                         fontsize=11, fontweight="bold", color=text_color)
 
     cbar = fig.colorbar(im, ax=ax, shrink=0.7, pad=0.02)
-    cbar.set_label("Số lần", fontsize=9)
-    ax.set_title("Mỗi ô = số lần staff mắc lỗi tương ứng",
+    cbar.set_label("Count", fontsize=9)
+    ax.set_title("Each cell = number of times staff encountered the error",
                  fontsize=10, color=GRAY, pad=12)
     _save_chart(fig, pdf, out_dir, "08_error_heatmap")
 
@@ -2257,17 +2327,6 @@ def _wrap_task_bullets(task_counts: Counter[str], width: int = 72) -> str:
         wrapped = textwrap.wrap(bullet, width=width, subsequent_indent="  ")
         lines.extend(wrapped or [bullet])
     return "\n".join(lines) if lines else "—"
-
-
-def _to_number(value: Any) -> float:
-    if value is None or value == "":
-        return 0.0
-    if isinstance(value, (int, float)):
-        return float(value)
-    match = re.search(r"-?\d+(?:[.,]\d+)?", str(value))
-    if not match:
-        return 0.0
-    return float(match.group(0).replace(",", "."))
 
 
 def chart_sdlc_tasks(sessions: list[Session], pdf: PdfPages, out_dir: Path) -> None:
@@ -2381,7 +2440,7 @@ def print_terminal_summary(sessions: list[Session]) -> None:
 
     by_tool: dict[str, list[Session]] = {}
     for s in sessions:
-        by_tool.setdefault(s.tool or "(không rõ)", []).append(s)
+        by_tool.setdefault(s.tool or "(unknown)", []).append(s)
     print("\n  ── Per Tool " + "─" * 50)
     print(f"  {'Tool':<22} {'#':>4} {'EST':>7} {'Actual':>7} {'Saved':>7} {'Eff%':>6}")
     for tool in sorted(by_tool, key=lambda k: -sum(s.time_saved or 0 for s in by_tool[k])):
@@ -2390,7 +2449,7 @@ def print_terminal_summary(sessions: list[Session]) -> None:
 
     by_cat: dict[str, list[Session]] = {}
     for s in sessions:
-        by_cat.setdefault(s.category or "(chưa phân loại)", []).append(s)
+        by_cat.setdefault(s.category or "(uncategorized)", []).append(s)
     print("\n  ── Per Category " + "─" * 46)
     print(f"  {'Category':<22} {'#':>4} {'EST':>7} {'Actual':>7} {'Saved':>7} {'Eff%':>6}")
     for cat in sorted(by_cat, key=lambda k: -sum(s.time_saved or 0 for s in by_cat[k])):
@@ -2452,6 +2511,14 @@ def main() -> int:
     # Assign row IDs for classification
     for i, s in enumerate(all_sessions):
         s.row_id = f"S{i + 1}"
+
+    # ── Phase 0: Translate input data to English ──
+    if not args.no_ai:
+        try:
+            translate_sessions_batch(all_sessions, args.model)
+        except Exception as e:
+            print(f"⚠  Translation failed: {e}", file=sys.stderr)
+            print("   Continuing with original language.", file=sys.stderr)
 
     # ── Phase 1 AI: Lesson inference ──
     with_lesson_ai = not args.no_ai and not args.no_lesson_ai
