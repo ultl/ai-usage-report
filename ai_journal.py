@@ -2028,29 +2028,27 @@ def build_sdlc_sheet(wb, sessions: list[Session]) -> None:
         base = [cat, _format_task_names(cat), summary_counts[cat],
                 round(summary_counts[cat] / total_sessions * 100, 1) if total_sessions else 0]
         if has_ai:
-            d_sav = round(ag["saved"] - ag["ai_saved"], 1)
-            base += [ag["ai_est"], ag["ai_actual"], ag["ai_saved"], ag["ai_eff"],
-                     ag["est"], ag["actual"], ag["saved"], ag["eff"],
-                     d_sav]
+            base += [ag["ai_eff"], ag["eff"]]
         else:
-            base += [ag["est"], ag["actual"], ag["saved"], ag["eff"]]
+            base += [ag["eff"]]
         summary_rows.append(base)
 
     summary_start = row
     if has_ai:
         sum_headers = ["SDLC Stage", "Task Names", "Task Count", "Share %",
-                       "Assessed EST", "Assessed Actual", "Assessed Saved", "Assessed %",
-                       "Self-Rep EST", "Self-Rep Actual", "Self-Rep Saved", "Self-Rep %",
-                       "Δ Saved"]
+                       "Assessed %", "Self-Reported %"]
     else:
         sum_headers = ["SDLC Stage", "Task Names", "Task Count", "Share %",
-                       "EST (h)", "Actual (h)", "Saved (h)", "Efficiency %"]
+                       "Efficiency %"]
     summary_end, _ = _write_xl_table(ws, row, 1, sum_headers, summary_rows)
-    _bar_xl_chart(ws, "Tasks by SDLC Stage", summary_start, summary_end, 3, 3, 1, "F4", y_title="Tasks")
-    eff_col = 8 if has_ai else 8
-    _bar_xl_chart(ws, "Assessed Efficiency % by SDLC Stage" if has_ai else "Efficiency % by SDLC Stage",
-                  summary_start, summary_end, eff_col, eff_col, 1,
-                  "O4", y_title="Efficiency %", chart_type="bar", height=10, width=18)
+    _bar_xl_chart(ws, "Tasks by SDLC Stage", summary_start, summary_end, 3, 3, 1,
+                  "F4" if not has_ai else "G4", y_title="Tasks")
+    if has_ai:
+        _bar_xl_chart(ws, "Assessed vs Self-Reported Efficiency %", summary_start, summary_end,
+                      5, 6, 1, "O4", y_title="Efficiency %", chart_type="bar", height=10, width=18)
+    else:
+        _bar_xl_chart(ws, "Efficiency % by SDLC Stage", summary_start, summary_end,
+                      5, 5, 1, "F4", y_title="Efficiency %", chart_type="bar", height=10, width=18)
 
     staff_list, matrix_rows = sdlc_staff_matrix(sessions)
     matrix_row = summary_end + 3
