@@ -8,3 +8,4 @@ out/*
 .omx/
 charts_output/
 TOOLS_SUMMARY.md
+*.md

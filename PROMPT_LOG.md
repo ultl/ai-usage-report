@@ -141,3 +141,44 @@ All user prompts from the development conversation, in chronological order.
 ### Prompt 33
 >
 > Create a markdown file logging all of my prompts with specific date in this conversation
+
+### Prompt 34
+>
+> create me a skill to log all of my prompt in this conversation session
+
+### Prompt 35
+>
+> how to use /log-prompt
+
+### Prompt 36
+>
+> does the profile.yml work in the codebase?
+
+### Prompt 37
+>
+> The accuracy need to be clarified as the hours a team member provide is less or more than AI expected
+
+### Prompt 38
+>
+> what about ltluyen8
+
+### Prompt 39
+>
+> Based on best practice of under-reports from team members, create a python script to use LLM to read these content and reason to provide a report pdf file that:
+> -  give best practice from prompting compared with rule-based prompting standard in system prompt.
+> - objectives from c-codex: the agent has bugs, constraints, how to workaround
+> - subjectives from team members: like understand quickly or have previous experience with this bugs.
+>
+> Ask me everything before creating the code.
+
+### Prompt 40 (answers to clarification questions)
+>
+> 1. yes 2. yes 3. yes 4. markdown then pdf 6. yes 7. per-person then team-wide
+
+### Prompt 41
+>
+> No, just ignore
+
+### Prompt 42
+>
+> change profile.json into profile.yml and modify the logic
