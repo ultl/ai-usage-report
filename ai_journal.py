@@ -1133,7 +1133,8 @@ def build_dashboard_sheet(wb: Workbook, sessions: list[Session]) -> None:
         "EST = Estimated hours without AI  •  Actual = Hours spent with AI  •  "
         "Saved = EST − Actual  •  Savings % = Saved / EST × 100  •  "
         "Δ = Self-Reported − Assessed  •  "
-        "Accuracy = Self-Rep Saved / Assessed Saved × 100"
+        "Accuracy = Self-Rep Saved / Assessed Saved × 100  •  "
+        "Verdict = whether user under- or over-reports vs AI"
     ) if has_ai else (
         "EST = Estimated hours without AI  •  Actual = Hours spent with AI  •  "
         "Saved = EST − Actual  •  Savings % = Saved / EST × 100"
@@ -1212,7 +1213,7 @@ def build_dashboard_sheet(wb: Workbook, sessions: list[Session]) -> None:
 
     # ── Self-Report Accuracy per Staff ──
     if has_ai:
-        _section(ws, cursor, "SELF-REPORT ACCURACY  —  Deviation from AI Objective Estimate (Δ = Self-Reported − Assessed)")
+        _section(ws, cursor, "SELF-REPORT ACCURACY  —  Δ = Self-Reported − Assessed  |  Accuracy = Self-Rep Saved / Assessed Saved × 100")
         cursor += 1
         cmp_headers = [
             "Staff",
@@ -1220,7 +1221,7 @@ def build_dashboard_sheet(wb: Workbook, sessions: list[Session]) -> None:
             "Assessed Actual", "Self-Reported Actual", "Δ Actual",
             "Assessed Saved", "Self-Reported Saved", "Δ Saved",
             "Assessed %", "Self-Reported %", "Δ %",
-            "Accuracy",
+            "Accuracy", "Verdict",
         ]
         for i, h in enumerate(cmp_headers, 1):
             ws.cell(row=cursor, column=i, value=h)
@@ -1237,14 +1238,28 @@ def build_dashboard_sheet(wb: Workbook, sessions: list[Session]) -> None:
             ds = round(sa["saved"] - sa["ai_saved"], 1)
             dp = round(sa["eff"] - sa["ai_eff"], 1)
             # Accuracy: how close self-reported saved is to assessed saved (%)
-            acc = f"{sa['saved'] / sa['ai_saved'] * 100:.0f}%" if sa["ai_saved"] else "—"
+            acc_val = (sa["saved"] / sa["ai_saved"] * 100) if sa["ai_saved"] else 0
+            acc = f"{acc_val:.0f}%"
+            # Verdict: explain the gap in plain language
+            if sa["ai_saved"] and abs(acc_val - 100) < 10:
+                verdict = "Accurate"
+            elif ds < -0.5 and de < -0.5:
+                verdict = f"Under-reports by {abs(ds)}h — thinks tasks are easier than AI expects"
+            elif ds < -0.5:
+                verdict = f"Under-reports savings by {abs(ds)}h — undervalues AI contribution"
+            elif ds > 0.5 and sa["eff"] > sa["ai_eff"] + 5:
+                verdict = f"Over-reports by {ds}h — claims more savings than AI expects"
+            elif ds > 0.5:
+                verdict = f"Over-reports savings by {ds}h"
+            else:
+                verdict = "Aligned with AI estimate"
             cmp_rows.append((
                 staff,
                 sa["ai_est"], sa["est"], de,
                 sa["ai_actual"], sa["actual"], da,
                 sa["ai_saved"], sa["saved"], ds,
                 sa["ai_eff"], sa["eff"], dp,
-                acc,
+                acc, verdict,
             ))
         for i, row in enumerate(cmp_rows):
             for j, v in enumerate(row, 1):
