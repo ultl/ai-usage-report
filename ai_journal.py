@@ -699,11 +699,20 @@ IMPORTANT: Return ALL sessions. Use numeric values (float). Do not skip any.
 
 
 def _load_profiles(path: Path | None) -> dict[str, dict[str, str]]:
-    """Load staff profiles from JSON file. Keys are staff names (case-insensitive match)."""
+    """Load staff profiles from YAML or JSON file. Keys are staff names."""
     if path is None or not path.exists():
         return {}
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        if path.suffix.lower() in (".yml", ".yaml"):
+            try:
+                import yaml
+                raw = yaml.safe_load(text)
+            except ImportError:
+                print("  ⚠  PyYAML not installed. Install with: pip install pyyaml", file=sys.stderr)
+                return {}
+        else:
+            raw = json.loads(text)
         if isinstance(raw, dict):
             return {k: v for k, v in raw.items() if isinstance(v, dict)}
     except Exception as e:
@@ -2923,7 +2932,7 @@ def main() -> int:
     ap.add_argument("--skip-pdf", action="store_true",
                     help="Skip PDF/PNG chart generation")
     ap.add_argument("--profiles", type=Path, default=None,
-                    help="JSON file with staff profiles for AI hour estimation")
+                    help="YAML or JSON file with staff profiles for AI hour estimation")
     ap.add_argument("--no-estimate", action="store_true",
                     help="Skip AI hour estimation")
     ap.add_argument("--batch-size", type=int, default=20,

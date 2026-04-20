@@ -1,0 +1,125 @@
+Dngiang:
+  role: Frontend Developer
+  experience: 1 year
+  stack: Vue.js, Vuex, Axios, Ant Design, SASS/SCSS.
+  notes: |
+    Workflow:
+    Use the coding agent in code mode to read the entire codebase.
+    Have the agent export a project overview file covering: libraries, tech stacks, packages, installed dependencies, known conflicts, configuration, versions, and environment setup.
+    Use the agent to assist with deployment of the codebase.
+    When developing components, describe each component in detail in the prompt (structure, behavior, styling, props, events).
+    To fix bugs, paste terminal output directly into the agent as context.
+
+    When context is lost (out-of-context):
+    Start a new session.
+    Re-prompt the full task description plus any new requirements at the beginning of the new session.
+
+    Known limitations & guardrails:
+    No image input: The company blocks image uploads. All UI descriptions must be written in text — describe layouts, spacing, colors, and component hierarchy verbally instead of using screenshots.
+    Hard to trace code in responses: The agent's query and response formatting can look similar, making it difficult to distinguish. As a workaround, explicitly ask the agent to list all modified files at the end of its response with file paths, so changes can be traced file by file.
+
+Lnmai2:
+  role: Business Analyst
+  experience: 2 years BA, requirements analysis
+  stack: | 
+    BABOK,
+    Agile/Scrum,
+    Design Thinking,
+    BPMN,
+    UML,
+    User Stories,
+    Jira,
+    Draw.io,
+    Stakeholder Management,
+    Requirement Elicitation & Prioritization
+  notes: |
+    Tools: Microsoft Copilot (free plan, chatbot), draw.io for wireframes.
+    Workflow:
+    Phase 1: Requirements Received
+      Receive requirements from the Product Owner via email or private messages.
+      Copy the raw content into Microsoft Copilot with clear ordering instructions.
+      Use Copilot to standardize and structure the raw requirements into a clean format.
+    Phase 2: Requirements Research
+      Prompt Copilot to brainstorm key points from the standardized requirements.
+      Use Copilot to generate a list of business-related questions targeting stakeholders (Product Owner) and key users (HR staff).
+      Conduct interviews with stakeholders and key users using the generated questions.
+    Phase 3: Analysis
+      Apply frameworks as appropriate: BPMN, Flowcharts, UML Diagrams, Gap Analysis (As-Is vs. To-Be).
+      Input collected information (images + text) into Copilot to convert findings into categorized requirements: functional, non-functional, and business requirements.
+      Prompt Copilot to detect conflicts among requirements, identify edge cases, and surface gaps between the current state and the target state.
+    Phase 4: Design
+      Create wireframes manually using draw.io (chosen over Figma for speed; no AI assistance in this step).
+      Use Copilot to generate supporting design texts: screen flows, UI checklists, field definitions, and validation rules.
+    Phase 5: Documentation
+      Write a function list, then prompt Copilot to standardize the formatting and language.
+      Derive use cases and user stories from the function list and process flows.
+      Draft the SRS document; use Copilot to generate and expand SRS content based on the use cases and user stories.
+    Phase 6: Demo & Training
+      Conduct demos and training sessions manually. No AI involvement in this phase.
+
+Ltluyen8:
+  role: AI Engineer/ Project Assistant
+  experience: 2 years manual & automation testing
+  stack: Python, LLM, prompt engineering, test automation frameworks (e.g., Selenium, PyTest), CI/CD tools (e.g., Jenkins, GitHub Actions)
+  notes: |
+    Tools: Claude code, Codex, C-codex
+    Workflow:
+    Phase 1: Project Setup
+     Generate a python script to create project reports, track progress, and compare team member's performance of using this coding agent.
+    Phase 2: Workflow Creation
+     Use agent to create a project workflow of all team members' tasks and deadlines, then export it to a shared document for visibility.
+
+Naduc11:
+  role: Tech lead/ Backend Developer
+  experience: 3 years Node.js/TypeScript
+  stack: Node.js, TypeScript, MongoDB, Redis
+  notes: 
+
+Nvbinh3:
+  role: Backend Developer
+  experience: 2 years
+  stack: |
+      Java 11, Spring Boot 2.2.9, Spring Cloud (Hoxton.SR7) — Eureka, Zuul, Hystrix, Ribbon
+      Spring Security + JWT
+      Spring MVC + Swagger for API documentation
+      MongoDB (primary), MySQL, MSSQL via JDBC/JPA/Hibernate
+      Apache Kafka for messaging
+      Redis for session/caching
+      Docker Compose for orchestration
+      Maven with multi-environment profiles (local, dev, stag, uat, prod, automations)
+      RxJava, Reactor, Lombok, Jackson, Gson
+      Logback for logging
+      YAML-based configuration for Spring profiles and environment separation
+  notes: |
+      Workflow:
+      Use the coding agent to read and understand the existing codebase.
+      Define rules in the coding agent's system prompt to enforce project-specific coding standards and conventions.
+      Use the coding agent to run the backend application and generate documentation on how to start and run it.
+      Receive SRS from the BA, then prompt the coding agent with the SRS content and the established rules to develop new features.
+      Use the coding agent to fix bugs encountered during development.
+
+      Known limitations & guardrails:
+      Context window: Each session typically handles only one query effectively due to limited context. Start a new session per task when needed.
+      Skills file: The coding agent does not yet automatically read the skills file. Manually include relevant skills/patterns in the prompt when the agent needs project-specific knowledge.
+      No prompt editing: Previous prompts in a session cannot be edited. If a prompt was wrong, restate the corrected version in a new message or session.
+      Code mode caution: The agent modifies code directly without confirmation. Always use version control (Git) before prompting, so changes can be reviewed and reverted.
+
+Ltlinh7:
+  role: Manual QA Tester
+  experience: 2 years
+  stack: Manual testing, test case design, exploratory testing, Regression testing, Jira, Postman tool, MySQL, tool, SQL, Rest API, HTTP
+  notes: |
+      Tools: Microsoft Copilot (free plan, chatbot). All prompts written in Vietnamese.
+      Prompting template: Persona + Input + Output. Always define a QA persona (e.g., You are an experienced QA tester…), provide the input documents, and specify the desired output format. If the response is unclear, ask follow-up questions before accepting.
+      Workflow:
+      Phase 1: Analysis
+      Receive documentation from the BA: SRS, workflow diagrams.
+      Input these documents into Copilot with the persona-based prompting template.
+      Generate test cases from the documentation.
+      Review the AI output and prompt follow-up questions for any unclear or incomplete areas.
+
+      Phase 2: Write Test Cases (General → Detailed)
+      Start from high-level test perspectives, then drill down into UI-level detail.
+      Use Copilot to create a checklist that maps to use cases.
+      Use user stories as additional input to generate more test cases.
+      Approximately 80% of test case writing is AI-assisted; the remaining 20% is manual review, adjustment, and edge-case additions.
