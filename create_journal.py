@@ -233,16 +233,22 @@ def generate_journal_entries(prompts: list[dict], model: str,
 
 
 def write_journal(entries: list[dict], output: Path, staff: str) -> None:
-    """Write journal entries to xlsx using template.xlsx format."""
-    template = TEMPLATE_PATH
-    if not template.exists():
-        print(f"Template not found: {template}", file=sys.stderr)
-        sys.exit(1)
+    """Write journal entries to xlsx. Only modifies the Nhật Ký sheet; all other sheets stay intact."""
+    # If output already exists, open it to preserve other sheets
+    # Otherwise copy from template
+    if output.exists():
+        wb = load_workbook(output)
+        print(f"   Opening existing file: {output} (only updating {NHAT_KY_SHEET})")
+    else:
+        template = TEMPLATE_PATH
+        if not template.exists():
+            print(f"Template not found: {template}", file=sys.stderr)
+            sys.exit(1)
+        wb = load_workbook(template)
 
-    wb = load_workbook(template)
     ws = wb[NHAT_KY_SHEET]
 
-    # Clear existing data rows (keep header)
+    # Clear existing data rows in Nhật Ký only (keep header row 3)
     for r in range(DATA_START_ROW, ws.max_row + 1):
         for c in range(1, 16):
             ws.cell(r, c).value = None

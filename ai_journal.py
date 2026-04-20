@@ -430,11 +430,14 @@ class Session:
 # =========================================================================== #
 
 def staff_from_filename(path: Path) -> str:
+    """Extract staff identifier from filename.
+    journal_AIE_ltluyen8.xlsx -> AIE_ltluyen8
+    journal_khanh.xlsx -> khanh
+    """
     stem = path.stem
-    parts = re.split(r"[_\-\s]+", stem)
-    blacklist = {"journal", "ai", "dev", "nhatky", "nhật", "ký", "log"}
-    meaningful = [p for p in parts if p.lower() not in blacklist and p]
-    return (meaningful[-1] if meaningful else stem).strip().capitalize()
+    # Remove leading "journal" prefix (with separator)
+    name = re.sub(r"^journal[_\-\s]+", "", stem, flags=re.IGNORECASE)
+    return name.strip() if name else stem.strip()
 
 
 def parse_file(path: Path) -> list[Session]:
@@ -721,9 +724,15 @@ def _load_profiles(path: Path | None) -> dict[str, dict[str, str]]:
 
 
 def _match_profile(staff: str, profiles: dict[str, dict[str, str]]) -> dict[str, str]:
-    """Case-insensitive profile lookup."""
+    """Case-insensitive profile lookup. Tries exact match, then partial match on last segment."""
+    staff_cf = staff.strip().casefold()
     for key, profile in profiles.items():
-        if key.strip().casefold() == staff.strip().casefold():
+        if key.strip().casefold() == staff_cf:
+            return profile
+    # Try matching the last part after _ (e.g., AIE_ltluyen8 -> ltluyen8)
+    last_part = staff_cf.rsplit("_", 1)[-1]
+    for key, profile in profiles.items():
+        if key.strip().casefold() == last_part:
             return profile
     return {}
 
