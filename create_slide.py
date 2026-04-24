@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Sprint 0 — AI Usage Report Slide Generator
+AI Usage Report — Slide Generator
 
-Reads the best-practices markdown report, uses LLM (gpt-5.4-mini) to
+Reads a best-practices markdown report + chart images, uses LLM to
 condense each section into presentation-ready bullet points, then builds
-a branded 16:9 .pptx with CMC Global theme + chart images.
+a branded 16:9 .pptx.
 
 Usage:
-    python slide.py                          # default output: sprint_0_report.pptx
-    python slide.py -o my_deck.pptx          # custom output path
-    python slide.py --model gpt-5.4-mini     # override model
+    python create_slide.py report.md charts/ -o slides.pptx
+    python create_slide.py report.md charts/ --logo logo.png --model gpt-5.4-mini
+    python create_slide.py report.md charts/ --title "Sprint 1" --subtitle "May 2026"
 """
 
 from __future__ import annotations
@@ -33,27 +33,8 @@ try:
 except Exception:
     pass
 
-# ── Paths ───────────────────────────────────────────────────────────────────
+# ── Paths (defaults, overridden by CLI args) ───────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
-REPORT_DIR = BASE_DIR / "report_sprint_0_v1_200426"
-CHARTS_DIR = REPORT_DIR / "charts_output"
-LOGO_PATH = BASE_DIR / "logo.png"
-
-
-def _find_report_md() -> Path:
-    """Search for the best practices markdown report, preferring the report dir."""
-    candidates = [
-        REPORT_DIR / "best_practices_report_sprint_0_v1.md",
-        BASE_DIR / "log" / "best_practices_report_sprint_0_v1.md",
-        BASE_DIR / "log" / "best_practices_report_sprint_0.md",
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
-    # Fallback: glob for any best_practices*.md
-    for p in sorted(BASE_DIR.rglob("best_practices*.md"), key=lambda x: x.stat().st_mtime, reverse=True):
-        return p
-    raise FileNotFoundError("No best practices report (.md) found in project")
 
 # ── Brand colours (CMC Global) ──────────────────────────────────────────────
 CMC_BLUE     = RGBColor(0x1A, 0x9F, 0xD9)   # primary accent
@@ -211,7 +192,7 @@ def _add_bg(slide, color=CMC_LIGHT_BG):
     fill.fore_color.rgb = color
 
 
-def _add_bottom_bar(slide):
+def _add_bottom_bar(slide, footer_text: str = ""):
     """Add a thin brand-colour bar at the bottom."""
     left, top = Inches(0), SLIDE_H - Inches(0.35)
     shape = slide.shapes.add_shape(
@@ -220,20 +201,20 @@ def _add_bottom_bar(slide):
     shape.fill.solid()
     shape.fill.fore_color.rgb = CMC_BLUE
     shape.line.fill.background()
-    # Footer text
     tf = shape.text_frame
     tf.word_wrap = True
     p = tf.paragraphs[0]
-    p.text = "CMC Global  |  AI Pilot Sprint 0 Report  |  April 2026"
+    p.text = footer_text
     p.font.size = Pt(9)
     p.font.color.rgb = CMC_WHITE
     p.alignment = PP_ALIGN.CENTER
 
 
-def _add_logo(slide, left=Inches(0.4), top=Inches(0.25), height=Inches(0.55)):
+def _add_logo(slide, logo_path: Path | None,
+              left=Inches(0.4), top=Inches(0.25), height=Inches(0.55)):
     """Place logo top-left."""
-    if LOGO_PATH.exists():
-        slide.shapes.add_picture(str(LOGO_PATH), left, top, height=height)
+    if logo_path and logo_path.exists():
+        slide.shapes.add_picture(str(logo_path), left, top, height=height)
 
 
 def _add_title_text(slide, title: str, subtitle: str = "",
@@ -283,11 +264,18 @@ def _add_chart_image(slide, chart_path: str | Path,
 
 # ── Slide assembly ──────────────────────────────────────────────────────────
 
-def build_presentation(model: str, output_path: str) -> str:
-    report_path = _find_report_md()
-    print(f"  Using report: {report_path}")
-    report_text = report_path.read_text(encoding="utf-8")
+def build_presentation(model: str, output_path: str,
+                       report_md: Path, charts_dir: Path,
+                       logo_path: Path | None,
+                       title: str, subtitle: str,
+                       company: str, overview: str | None,
+                       team: str | None) -> str:
+    print(f"  Using report: {report_md}")
+    print(f"  Using charts: {charts_dir}")
+    report_text = report_md.read_text(encoding="utf-8")
     sec = _extract_sections(report_text)
+
+    footer_text = f"{company}  |  {subtitle}  |  {title}"
 
     prs = Presentation()
     prs.slide_width = SLIDE_W
@@ -300,28 +288,28 @@ def build_presentation(model: str, output_path: str) -> str:
     sl = prs.slides.add_slide(blank_layout)
     _add_bg(sl, CMC_DARK)
 
-    if LOGO_PATH.exists():
-        sl.shapes.add_picture(str(LOGO_PATH), Inches(0.5), Inches(0.4), height=Inches(0.7))
+    if logo_path and logo_path.exists():
+        sl.shapes.add_picture(str(logo_path), Inches(0.5), Inches(0.4), height=Inches(0.7))
 
     txBox = sl.shapes.add_textbox(Inches(1.0), Inches(2.0), Inches(11), Inches(2.0))
     tf = txBox.text_frame
     tf.word_wrap = True
     p = tf.paragraphs[0]
-    p.text = "AI-Powered Development Pilot"
+    p.text = title
     p.font.size = Pt(40)
     p.font.bold = True
     p.font.color.rgb = CMC_WHITE
     p.alignment = PP_ALIGN.CENTER
 
     p2 = tf.add_paragraph()
-    p2.text = "Sprint 0 Performance Report"
+    p2.text = subtitle
     p2.font.size = Pt(28)
     p2.font.color.rgb = CMC_BLUE
     p2.alignment = PP_ALIGN.CENTER
     p2.space_before = Pt(8)
 
     p3 = tf.add_paragraph()
-    p3.text = "April 2026  |  CMC Global"
+    p3.text = f"{company}"
     p3.font.size = Pt(16)
     p3.font.color.rgb = CMC_WHITE
     p3.alignment = PP_ALIGN.CENTER
@@ -333,68 +321,66 @@ def build_presentation(model: str, output_path: str) -> str:
     bar.line.fill.background()
 
     # ================================================================
-    # SLIDE 2 — Project Overview & Team (hardcoded per user request)
+    # SLIDE 2 — Project Overview & Team
     # ================================================================
     sl = prs.slides.add_slide(blank_layout)
     _add_bg(sl)
-    _add_logo(sl)
+    _add_logo(sl, logo_path)
     _add_title_text(sl, "Project Overview")
-    _add_bottom_bar(sl)
+    _add_bottom_bar(sl, footer_text)
 
-    overview_bullets = [
-        "Apply AI tools in real-life software development to increase efficiency and save cost",
-        "Reduce project duration through AI-assisted coding and automation",
-        "Document team workflows to transfer knowledge to other projects",
-        "Develop internal modules and best practices for the company",
-        "Pilot ran 32 AI-assisted sessions across 6 staff members in Sprint 0",
-    ]
+    # Overview: use LLM to condense from report if not provided
+    if overview:
+        overview_bullets = [b.strip().lstrip("-•*").strip()
+                            for b in overview.strip().splitlines() if b.strip()]
+    else:
+        exec_text = _find_section(sec, "Executive Summary")
+        overview_bullets = condense(model, exec_text, "Project Overview", max_bullets=5)
     _add_bullets(sl, overview_bullets, width=Inches(5.5))
 
-    team_data = [
-        ("Frontend Developer", "1 yr exp"),
-        ("Backend Developer", "2 yrs exp"),
-        ("Tech Lead", "3 yrs exp"),
-        ("AI Engineer + Project Ordinator", "2 yrs exp"),
-        ("Project Manager", "5 yrs exp"),
-        ("Tester", "2 yrs exp"),
-        ("QA", "5 yrs exp"),
-    ]
-    txBox = sl.shapes.add_textbox(Inches(6.8), Inches(1.3), Inches(5.5), Inches(5.0))
-    tf = txBox.text_frame
-    tf.word_wrap = True
-    p = tf.paragraphs[0]
-    p.text = "Team Composition (7 members)"
-    p.font.size = Pt(16)
-    p.font.bold = True
-    p.font.color.rgb = CMC_BLUE
-    p.space_after = Pt(12)
-    for role, exp in team_data:
-        p = tf.add_paragraph()
-        run1 = p.add_run()
-        run1.text = f"\u2022  {role}"
-        run1.font.size = Pt(13)
-        run1.font.bold = True
-        run1.font.color.rgb = CMC_DARK
-        run2 = p.add_run()
-        run2.text = f"  — {exp}"
-        run2.font.size = Pt(13)
-        run2.font.color.rgb = CMC_GRAY
-        p.space_after = Pt(4)
+    # Team: parse from --team arg or extract from report
+    if team:
+        team_data = _parse_team_arg(team)
+    else:
+        team_data = []
+
+    if team_data:
+        txBox = sl.shapes.add_textbox(Inches(6.8), Inches(1.3), Inches(5.5), Inches(5.0))
+        tf = txBox.text_frame
+        tf.word_wrap = True
+        p = tf.paragraphs[0]
+        p.text = f"Team Composition ({len(team_data)} members)"
+        p.font.size = Pt(16)
+        p.font.bold = True
+        p.font.color.rgb = CMC_BLUE
+        p.space_after = Pt(12)
+        for role, exp in team_data:
+            p = tf.add_paragraph()
+            run1 = p.add_run()
+            run1.text = f"\u2022  {role}"
+            run1.font.size = Pt(13)
+            run1.font.bold = True
+            run1.font.color.rgb = CMC_DARK
+            run2 = p.add_run()
+            run2.text = f"  — {exp}"
+            run2.font.size = Pt(13)
+            run2.font.color.rgb = CMC_GRAY
+            p.space_after = Pt(4)
 
     # ================================================================
     # SLIDE 3 — Executive Summary (KPI chart)
     # ================================================================
     sl = prs.slides.add_slide(blank_layout)
     _add_bg(sl)
-    _add_logo(sl)
-    _add_title_text(sl, "Executive Summary", "Sprint 0 Key Results")
-    _add_bottom_bar(sl)
+    _add_logo(sl, logo_path)
+    _add_title_text(sl, "Executive Summary", "Key Results")
+    _add_bottom_bar(sl, footer_text)
 
     exec_text = _find_section(sec, "Executive Summary")
     exec_bullets = condense(model, exec_text, "Executive Summary", max_bullets=6)
     _add_bullets(sl, exec_bullets, width=Inches(5.5))
 
-    _add_chart_image(sl, CHARTS_DIR / "03_kpi_summary.png",
+    _add_chart_image(sl, charts_dir / "03_kpi_summary.png",
                      left=Inches(6.4), top=Inches(1.3), height=Inches(4.8))
 
     # ================================================================
@@ -402,17 +388,16 @@ def build_presentation(model: str, output_path: str) -> str:
     # ================================================================
     sl = prs.slides.add_slide(blank_layout)
     _add_bg(sl)
-    _add_logo(sl)
+    _add_logo(sl, logo_path)
     _add_title_text(sl, "Team Performance", "Time Saved per Team Member")
-    _add_bottom_bar(sl)
+    _add_bottom_bar(sl, footer_text)
 
-    # Combine per-person insights from section 4.1 for richer LLM input
     person_insights = _find_section(sec, "Per-Person", "Insights")
     staff_text = person_insights or _find_section(sec, "Team Member Subjective")
     staff_bullets = condense(model, staff_text, "Team Performance", max_bullets=6)
     _add_bullets(sl, staff_bullets, width=Inches(5.2))
 
-    _add_chart_image(sl, CHARTS_DIR / "02_staff_ai_effectiveness.png",
+    _add_chart_image(sl, charts_dir / "02_staff_ai_effectiveness.png",
                      left=Inches(5.8), top=Inches(1.2), height=Inches(5.2))
 
     # ================================================================
@@ -420,18 +405,16 @@ def build_presentation(model: str, output_path: str) -> str:
     # ================================================================
     sl = prs.slides.add_slide(blank_layout)
     _add_bg(sl)
-    _add_logo(sl)
+    _add_logo(sl, logo_path)
     _add_title_text(sl, "AI Impact Across Development Stages")
-    _add_bottom_bar(sl)
+    _add_bottom_bar(sl, footer_text)
 
-    # Pull the closing paragraph of executive summary about strongest adoption
-    # plus any SDLC-related content from the report
-    sdlc_text = exec_text  # exec summary has SDLC adoption insights
+    sdlc_text = exec_text
     sdlc_bullets = condense(model, sdlc_text,
                             "AI Impact by Development Stage", max_bullets=6)
     _add_bullets(sl, sdlc_bullets, width=Inches(4.8))
 
-    _add_chart_image(sl, CHARTS_DIR / "01_sdlc_tasks_by_stage.png",
+    _add_chart_image(sl, charts_dir / "01_sdlc_tasks_by_stage.png",
                      left=Inches(5.5), top=Inches(1.2), width=Inches(7.3), height=None)
 
     # ================================================================
@@ -439,15 +422,15 @@ def build_presentation(model: str, output_path: str) -> str:
     # ================================================================
     sl = prs.slides.add_slide(blank_layout)
     _add_bg(sl)
-    _add_logo(sl)
+    _add_logo(sl, logo_path)
     _add_title_text(sl, "AI Tools Performance", "Which Tools Delivered the Most Value")
-    _add_bottom_bar(sl)
+    _add_bottom_bar(sl, footer_text)
 
     tools_text = _find_section(sec, "Tool-Specific", "Findings")
     tools_bullets = condense(model, tools_text, "AI Tools Performance", max_bullets=6)
     _add_bullets(sl, tools_bullets, width=Inches(5.2))
 
-    _add_chart_image(sl, CHARTS_DIR / "04_est_actual_tool.png",
+    _add_chart_image(sl, charts_dir / "04_est_actual_tool.png",
                      left=Inches(5.8), top=Inches(1.2), height=Inches(5.2))
 
     # ================================================================
@@ -455,11 +438,10 @@ def build_presentation(model: str, output_path: str) -> str:
     # ================================================================
     sl = prs.slides.add_slide(blank_layout)
     _add_bg(sl)
-    _add_logo(sl)
+    _add_logo(sl, logo_path)
     _add_title_text(sl, "User Satisfaction", "Rating Distribution by AI Tool")
-    _add_bottom_bar(sl)
+    _add_bottom_bar(sl, footer_text)
 
-    # Combine tool findings + exec summary rating info
     rating_text = (
         tools_text + "\n\n"
         + "From Executive Summary: " + exec_text
@@ -468,7 +450,7 @@ def build_presentation(model: str, output_path: str) -> str:
                               "User Satisfaction Ratings", max_bullets=6)
     _add_bullets(sl, rating_bullets, width=Inches(5.2))
 
-    _add_chart_image(sl, CHARTS_DIR / "06_rating_distribution.png",
+    _add_chart_image(sl, charts_dir / "06_rating_distribution.png",
                      left=Inches(5.8), top=Inches(1.2), height=Inches(5.0))
 
     # ================================================================
@@ -476,17 +458,17 @@ def build_presentation(model: str, output_path: str) -> str:
     # ================================================================
     sl = prs.slides.add_slide(blank_layout)
     _add_bg(sl)
-    _add_logo(sl)
+    _add_logo(sl, logo_path)
     _add_title_text(sl, "Instruction Quality Analysis",
                     "Most Common Mistakes When Asking AI for Help")
-    _add_bottom_bar(sl)
+    _add_bottom_bar(sl, footer_text)
 
     errors_text = _find_section(sec, "Team-Wide", "Prompt Quality")
     errors_bullets = condense(model, errors_text,
                               "Instruction Quality Analysis", max_bullets=6)
     _add_bullets(sl, errors_bullets, width=Inches(5.2))
 
-    _add_chart_image(sl, CHARTS_DIR / "07_top_errors.png",
+    _add_chart_image(sl, charts_dir / "07_top_errors.png",
                      left=Inches(5.8), top=Inches(1.2), height=Inches(5.0))
 
     # ================================================================
@@ -494,10 +476,10 @@ def build_presentation(model: str, output_path: str) -> str:
     # ================================================================
     sl = prs.slides.add_slide(blank_layout)
     _add_bg(sl)
-    _add_logo(sl)
+    _add_logo(sl, logo_path)
     _add_title_text(sl, "Individual AI Usage Insights",
                     "What Each Team Member Does Well & Where to Improve")
-    _add_bottom_bar(sl)
+    _add_bottom_bar(sl, footer_text)
 
     person_prompt_text = _find_section(sec, "Per-Person", "Prompt")
     person_prompt_bullets = condense(
@@ -518,14 +500,14 @@ def build_presentation(model: str, output_path: str) -> str:
     # ================================================================
     sl = prs.slides.add_slide(blank_layout)
     _add_bg(sl)
-    _add_logo(sl)
+    _add_logo(sl, logo_path)
     _add_title_text(sl, "Deeper Insights",
                     "Error Patterns by Person & AI vs Self-Assessment")
-    _add_bottom_bar(sl)
+    _add_bottom_bar(sl, footer_text)
 
-    _add_chart_image(sl, CHARTS_DIR / "08_error_heatmap.png",
+    _add_chart_image(sl, charts_dir / "08_error_heatmap.png",
                      left=Inches(0.4), top=Inches(1.3), width=Inches(6.2), height=None)
-    _add_chart_image(sl, CHARTS_DIR / "09_user_vs_ai_comparison.png",
+    _add_chart_image(sl, charts_dir / "09_user_vs_ai_comparison.png",
                      left=Inches(6.8), top=Inches(1.3), width=Inches(6.0), height=None)
 
     # ================================================================
@@ -533,10 +515,10 @@ def build_presentation(model: str, output_path: str) -> str:
     # ================================================================
     sl = prs.slides.add_slide(blank_layout)
     _add_bg(sl)
-    _add_logo(sl)
+    _add_logo(sl, logo_path)
     _add_title_text(sl, "Team Adaptation & Biases",
                     "Who Adapts Fastest and Common Self-Assessment Gaps")
-    _add_bottom_bar(sl)
+    _add_bottom_bar(sl, footer_text)
 
     biases_text = _find_section(sec, "Team-Wide", "Patterns")
     biases_bullets = condense(model, biases_text,
@@ -545,7 +527,7 @@ def build_presentation(model: str, output_path: str) -> str:
                  left=Inches(0.6), top=Inches(1.3),
                  width=Inches(5.5), height=Inches(5.0))
 
-    _add_chart_image(sl, CHARTS_DIR / "05_est_actual_category.png",
+    _add_chart_image(sl, charts_dir / "05_est_actual_category.png",
                      left=Inches(6.2), top=Inches(1.2), height=Inches(5.2))
 
     # ================================================================
@@ -553,10 +535,10 @@ def build_presentation(model: str, output_path: str) -> str:
     # ================================================================
     sl = prs.slides.add_slide(blank_layout)
     _add_bg(sl)
-    _add_logo(sl)
+    _add_logo(sl, logo_path)
     _add_title_text(sl, "AI Tool Constraints & Workarounds",
                     "Lessons Learned from Real Usage")
-    _add_bottom_bar(sl)
+    _add_bottom_bar(sl, footer_text)
 
     limitations_text = _find_section(sec, "Known Limitations")
     workarounds_text = _find_section(sec, "Recommended Workarounds")
@@ -595,9 +577,9 @@ def build_presentation(model: str, output_path: str) -> str:
     # ================================================================
     sl = prs.slides.add_slide(blank_layout)
     _add_bg(sl)
-    _add_logo(sl)
+    _add_logo(sl, logo_path)
     _add_title_text(sl, "Recommendations", "What We Should Do Next")
-    _add_bottom_bar(sl)
+    _add_bottom_bar(sl, footer_text)
 
     rec_text = _find_section(sec, "Recommendations")
     rec_bullets = condense(model, rec_text, "Recommendations", max_bullets=8)
@@ -635,10 +617,10 @@ def build_presentation(model: str, output_path: str) -> str:
     # ================================================================
     sl = prs.slides.add_slide(blank_layout)
     _add_bg(sl)
-    _add_logo(sl)
+    _add_logo(sl, logo_path)
     _add_title_text(sl, "Training Plan",
                     "Targeted Skill Development for Each Team Member")
-    _add_bottom_bar(sl)
+    _add_bottom_bar(sl, footer_text)
 
     training_text = _find_section(sec, "Training")
     training_bullets = condense(model, training_text,
@@ -653,8 +635,8 @@ def build_presentation(model: str, output_path: str) -> str:
     sl = prs.slides.add_slide(blank_layout)
     _add_bg(sl, CMC_DARK)
 
-    if LOGO_PATH.exists():
-        sl.shapes.add_picture(str(LOGO_PATH), Inches(0.5), Inches(0.4), height=Inches(0.6))
+    if logo_path and logo_path.exists():
+        sl.shapes.add_picture(str(logo_path), Inches(0.5), Inches(0.4), height=Inches(0.6))
 
     txBox = sl.shapes.add_textbox(Inches(1.0), Inches(1.5), Inches(11), Inches(0.8))
     tf = txBox.text_frame
@@ -665,7 +647,6 @@ def build_presentation(model: str, output_path: str) -> str:
     p.font.color.rgb = CMC_WHITE
     p.alignment = PP_ALIGN.CENTER
 
-    # Feed the closing note + full report to LLM for a rich conclusion
     closing_note = report_text.split("## Closing note")[-1] if "## Closing note" in report_text else ""
     conclusion_input = closing_note + "\n\n" + report_text[:6000]
     conclusion_bullets = generate_conclusion(model, conclusion_input)
@@ -684,7 +665,7 @@ def build_presentation(model: str, output_path: str) -> str:
     txBox3 = sl.shapes.add_textbox(Inches(1.0), Inches(6.2), Inches(11), Inches(0.6))
     tf3 = txBox3.text_frame
     p = tf3.paragraphs[0]
-    p.text = "Thank you  |  CMC Global  |  Aspire to Inspire the Digital World"
+    p.text = f"Thank you  |  {company}"
     p.font.size = Pt(14)
     p.font.color.rgb = CMC_BLUE
     p.alignment = PP_ALIGN.CENTER
@@ -694,18 +675,80 @@ def build_presentation(model: str, output_path: str) -> str:
     return output_path
 
 
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+def _parse_team_arg(team_str: str) -> list[tuple[str, str]]:
+    """Parse team string like 'FE:1yr,BE:2yrs,TechLead:3yrs' into [(role, exp)]."""
+    result = []
+    for entry in team_str.split(","):
+        entry = entry.strip()
+        if ":" in entry:
+            role, exp = entry.split(":", 1)
+            result.append((role.strip(), exp.strip()))
+        elif entry:
+            result.append((entry, ""))
+    return result
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 def main():
-    ap = argparse.ArgumentParser(description="Generate Sprint 0 AI report slides")
-    ap.add_argument("-o", "--output", default="sprint_0_report.pptx",
-                    help="Output .pptx path (default: sprint_0_report.pptx)")
+    ap = argparse.ArgumentParser(
+        description="Generate AI usage report slides from a best-practices report + charts.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+        Examples:
+          python create_slide.py report.md charts/ -o slides.pptx
+          python create_slide.py report.md charts/ --logo logo.png --title "AI Pilot" --subtitle "Sprint 1 Report"
+          python create_slide.py report.md charts/ --team "FE:1yr,BE:2yrs,TechLead:3yrs,PM:5yrs"
+          python create_slide.py report.md charts/ --overview "Goal 1\\nGoal 2\\nGoal 3"
+        """),
+    )
+    ap.add_argument("report", type=Path,
+                    help="Path to best-practices markdown report (.md)")
+    ap.add_argument("charts", type=Path,
+                    help="Directory containing chart PNG images")
+    ap.add_argument("-o", "--output", default="slides.pptx",
+                    help="Output .pptx path (default: slides.pptx)")
     ap.add_argument("--model", default="gpt-5.4-mini",
                     help="LLM model for content condensing (default: gpt-5.4-mini)")
+    ap.add_argument("--logo", type=Path, default=None,
+                    help="Path to company logo image (optional)")
+    ap.add_argument("--title", default="AI-Powered Development Pilot",
+                    help="Slide deck title (default: AI-Powered Development Pilot)")
+    ap.add_argument("--subtitle", default="Performance Report",
+                    help="Slide deck subtitle (default: Performance Report)")
+    ap.add_argument("--company", default="CMC Global",
+                    help="Company name for branding (default: CMC Global)")
+    ap.add_argument("--overview", default=None,
+                    help="Project overview bullets (newline-separated). "
+                         "If omitted, extracted from report via LLM.")
+    ap.add_argument("--team", default=None,
+                    help="Team composition as 'Role:Exp,Role:Exp,...' "
+                         "(e.g. 'FE:1yr,BE:2yrs,TechLead:3yrs'). "
+                         "If omitted, team slide section is skipped.")
     args = ap.parse_args()
 
+    if not args.report.exists():
+        print(f"ERROR: Report not found: {args.report}")
+        return
+    if not args.charts.is_dir():
+        print(f"ERROR: Charts directory not found: {args.charts}")
+        return
+
     print(f"Generating slides with model={args.model} ...")
-    out = build_presentation(args.model, args.output)
+    out = build_presentation(
+        model=args.model,
+        output_path=args.output,
+        report_md=args.report,
+        charts_dir=args.charts,
+        logo_path=args.logo,
+        title=args.title,
+        subtitle=args.subtitle,
+        company=args.company,
+        overview=args.overview,
+        team=args.team,
+    )
     print(f"Done! Saved to: {out}")
 
 
