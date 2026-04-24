@@ -84,7 +84,7 @@ def _call_llm(model: str, prompt: str, timeout: int = 120) -> str:
 
     body: dict[str, Any] = {
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3,
+        "temperature": 0,
         "max_completion_tokens": 4000,
     }
     if not is_azure:
@@ -100,11 +100,17 @@ def _call_llm(model: str, prompt: str, timeout: int = 120) -> str:
 SYSTEM_SLIDE = textwrap.dedent("""\
 You are a senior project manager preparing a client-facing PowerPoint presentation.
 Your audience is NON-TECHNICAL (executives, clients who do not understand coding agents).
-Rules:
+
+CRITICAL — NO HALLUCINATION:
+- ONLY use numbers, percentages, and statistics that appear EXPLICITLY in the source content below.
+- If the source has no number for a point, describe it qualitatively. Do NOT invent or estimate numbers.
+- If the source says "reduce errors" without a %, write "reduce errors" — do NOT add a made-up %.
+
+Formatting rules:
 - Return ONLY bullet points (use "- " prefix), no headings, no markdown formatting.
-- Each bullet max 10 words with analysis (always include a numerical value - percentage, number, or specific example). Prefer plain business language.
+- Each bullet max 15 words. Prefer plain business language.
 - Each bullet needs to have a noun phrase, for example: "Documentation: 8 tasks, 50% time saved" or "Tester: 23.5h saved (62% efficiency)".
-- Each slide needs to have a summary insights section.
+- Include a final bullet that summarises the key insight from this section.
 - Focus on the task's performance of each team member using AI tools, not the technical details of the tools themselves.
 - Replace jargon: "prompt" → "instruction to AI", "context ordering" → "giving AI clear info".
 - No code, no XML, no technical syntax.
@@ -135,8 +141,13 @@ def generate_conclusion(model: str, full_report: str) -> list[str]:
     prompt = textwrap.dedent(f"""\
     You are a senior project manager writing a conclusion slide for executives.
     Audience: non-technical clients and company leadership.
+
+    CRITICAL — NO HALLUCINATION:
+    - ONLY use numbers, percentages, and statistics that appear EXPLICITLY in the report below.
+    - If the report has no number for a point, describe it qualitatively. Do NOT invent numbers.
+
     Based on the report below, write 5-6 bullet points summarising:
-    1. The overall result of the AI pilot (time saved, efficiency %).
+    1. The overall result of the AI pilot (use only numbers from the report).
     2. The biggest win.
     3. The biggest area for improvement.
     4. What the team should do next.
