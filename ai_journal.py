@@ -865,16 +865,39 @@ Use EXACTLY these principles (Anthropic Claude Prompting Best Practices) as your
 <user_self_lesson>{user_lesson}</user_self_lesson>
 </session_to_analyze>
 
+<important_context>
+The <user_prompt> field may contain EITHER:
+- A SINGLE prompt (one instruction), OR
+- MULTIPLE prompts from the same session, separated by "---" delimiters.
+
+If the field contains multiple prompts (separated by "---"), this represents a full
+conversation flow where the user sent several messages in one session. In this case:
+- Judge the OVERALL session quality as a whole — how well did the user guide the AI
+  across the entire interaction?
+- Consider whether the user provided enough context upfront or had to repeatedly
+  clarify, whether follow-up prompts were necessary due to poor initial framing,
+  and whether the conversation flow was efficient.
+- A session that required many small follow-up corrections suggests weak initial
+  prompting. A session with a strong first prompt and minimal follow-ups suggests
+  good prompting discipline.
+- Give ONE overall score for the session, not an average of individual prompts.
+
+If the field contains a single prompt, judge it as-is.
+</important_context>
+
 <instructions>
 Perform the following steps in order:
 
-1. **Read <user_prompt>** and check which principles from <best_practices_rubric> it meets or violates. Identify the 1–2 MOST SEVERELY VIOLATED principles.
+1. **Read <user_prompt>** and check which principles from <best_practices_rubric> it meets or violates. If multiple prompts are present, evaluate the session flow as a whole. Identify the 1–2 MOST SEVERELY VIOLATED principles.
 
 2. **Write `ai_lesson`** (English, 2–3 sentences, EXTREMELY SPECIFIC):
    - Name the violated principle (name + number from rubric).
    - Quote or describe exactly which part of <user_prompt> is missing/weak.
    - Briefly explain the observed consequence in <ai_result>.
    - Do NOT write generically — specify exactly WHAT context is missing.
+   - If multi-prompt session: note whether the follow-up prompts compensated for
+     initial weaknesses, or whether the whole chain could have been a single
+     well-structured prompt.
 
 3. **Compare with <user_self_lesson>** → choose ONE label for `comparison`:
    - "Agree" — your lesson and user's align on the main principle.
@@ -886,7 +909,9 @@ Perform the following steps in order:
    - 1=fail, 2=poor, 3=average, 4=good, 5=excellent.
    - Write `ai_rating_reason` (1 sentence in English).
 
-5. **Write `suggested_prompt`** — improved version of <user_prompt>, APPLYING all relevant best practices. MUST include:
+5. **Write `suggested_prompt`** — an improved SINGLE prompt that could replace
+   the entire session (whether it was one prompt or many). APPLYING all relevant
+   best practices. MUST include:
    - Start with <role>...</role> assigning a specific role.
    - Include <context>...</context> with background and tech stack.
    - Include <task>...</task> listing requirements with numbered steps.
@@ -956,9 +981,11 @@ def infer_lessons_batch(sessions: list[Session], model: str) -> None:
             hits += 1
             print(f"  [{i}/{total}] {s.staff} — {s.title[:50]} (cached)")
             continue
+        # Use higher truncation limit for prompt field to accommodate
+        # multi-prompt sessions (all prompts from a session joined by ---)
         prompt = LESSON_PROMPT_TEMPLATE.format(
             title=_truncate(s.title, 200), tool=s.tool, category=s.category,
-            task_desc=_truncate(s.task_desc), prompt=_truncate(s.prompt),
+            task_desc=_truncate(s.task_desc), prompt=_truncate(s.prompt, 4000),
             result=_truncate(s.result),
             user_lesson=_truncate(s.user_lesson, 600) or "(empty)",
         )

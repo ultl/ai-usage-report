@@ -97,17 +97,23 @@ def _load_profiles(path: Path | None) -> dict[str, dict[str, str]]:
     return {}
 
 
-def parse_prompt_log(path: Path) -> list[dict[str, str]]:
-    """Parse PROMPT_LOG.md into a list of {number, date, text} dicts."""
+def parse_prompt_log(path: Path) -> list[dict[str, Any]]:
+    """Parse PROMPT_LOG.md into a list of {number, date, session, text} dicts.
+
+    Each prompt is tagged with its session identifier (e.g. "Session 1")
+    so that downstream code can group all prompts from the same session.
+    """
     content = path.read_text(encoding="utf-8")
-    prompts: list[dict[str, str]] = []
+    prompts: list[dict[str, Any]] = []
     current_date = ""
+    current_session = ""
 
     for line in content.split("\n"):
-        # Date header: ## 2026-04-20 — Session
-        date_match = re.match(r"^## (\d{4}-\d{2}-\d{2})", line)
+        # Date/session header: ## 2026-04-20 — Session 1
+        date_match = re.match(r"^## (\d{4}-\d{2}-\d{2})\s*[—–-]\s*(.*)", line)
         if date_match:
             current_date = date_match.group(1)
+            current_session = date_match.group(2).strip() or current_date
             continue
 
         # Prompt header: ### Prompt 1
@@ -116,6 +122,7 @@ def parse_prompt_log(path: Path) -> list[dict[str, str]]:
             prompts.append({
                 "number": prompt_match.group(1),
                 "date": current_date,
+                "session": current_session,
                 "text": "",
             })
             continue
@@ -133,6 +140,22 @@ def parse_prompt_log(path: Path) -> list[dict[str, str]]:
     return [p for p in prompts if p["text"].strip()]
 
 
+def group_prompts_by_session(prompts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group prompts into session bundles: [{session, date, prompts: [...]}]."""
+    from collections import OrderedDict
+    sessions: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    for p in prompts:
+        key = p["session"]
+        if key not in sessions:
+            sessions[key] = {
+                "session": key,
+                "date": p["date"],
+                "prompts": [],
+            }
+        sessions[key]["prompts"].append(p)
+    return list(sessions.values())
+
+
 JOURNAL_PROMPT = """<role>
 You are a senior software engineer filling out an AI Dev Journal for a team member.
 You analyze their prompts/interactions with AI tools and create structured journal entries.
@@ -143,15 +166,29 @@ You analyze their prompts/interactions with AI tools and create structured journ
 </staff_profile>
 
 <task>
-Below are prompts from a work session. Group related prompts into logical tasks/sessions,
-then for EACH task create a journal entry with these fields:
+Below are prompts already grouped by session. Each session contains all prompts from
+a single working session. Create ONE journal entry per session.
+
+For EACH session, fill in these fields:
 
 - `date`: The date (from the prompt log), format YYYY-MM-DD
 - `title`: Short descriptive title of the task (5-10 words)
 - `tool`: AI tool used (e.g., "Claude Code", "Claude", "ChatGPT", "Copilot"). Infer from context.
 - `category`: One of: Architecture, Backend, Frontend, Bug Fix, Documentation, Refactor, Report, Testing, DevOps, Research, Database Design, Business Logic, Integration
-- `task_desc`: 1-2 sentence description of what the task was about
-- `prompt`: The main prompt or summarized prompt used (keep under 200 chars)
+- `task_desc`: 1-2 sentence description of what the session was about
+- `all_prompts`: ALL individual prompts from this session, joined with "\\n---\\n" separator.
+  Include the FULL text of every prompt — do NOT summarize or truncate. This is the raw log.
+- `prompt`: A summarized version of the main prompt (keep under 200 chars). The prompt needs to follow these principles (Anthropic Claude Prompting Best Practices) as your scoring rubric:
+    1. **Clear & Direct** — Does the prompt specify output format, constraints, and sequential steps?
+    2. **Context & Motivation** — Does the prompt explain *why* (goals, target audience, business context)?
+    3. **Examples (few-shot)** — For complex/repeated tasks, are 2–5 diverse examples included?
+    4. **XML Structure** — Are different sections separated with consistent XML tags?
+    5. **Role Assignment** — Is a specific role/persona assigned to the AI?
+    6. **Long-context Ordering** — For long inputs, is the data placed ABOVE the question/instructions?
+    7. **Positive Instructions** — Does it tell AI *what to do* rather than *what not to do*?
+    8. **Ground in Quotes** — For document analysis, does it ask AI to quote relevant parts first?
+    9. **Self-check** — Does it ask AI to verify its own output before finishing?
+    10. **Output Format Specification** — Is the output schema clearly defined?
 - `result`: What was achieved/delivered (infer from the prompt intent)
 - `quality`: Rating text like "5 ★ Excellent", "4 ★ Good", "3 ★ Average", "2 ★ Poor"
 - `rating`: Numeric 1-5 (estimate based on how well-defined the prompt was and likely outcome)
@@ -166,18 +203,14 @@ Guidelines for estimating hours:
 - Simple prompts (quick questions): 0.5-1h manual, 0.1-0.25h with AI
 - Medium tasks (code changes, analysis): 2-4h manual, 0.5-1.5h with AI
 - Complex tasks (architecture, full features): 4-8h manual, 1-3h with AI
-- Group very short prompts (follow-up questions, confirmations) into the parent task
-
-Group prompts that are clearly part of the same task flow. Don't create a separate
-entry for every single prompt — merge related ones into cohesive tasks.
 </task>
 
-<prompts>
-{prompts_json}
-</prompts>
+<sessions>
+{sessions_json}
+</sessions>
 
 <output_format>
-Return a JSON object with a "sessions" array:
+Return a JSON object with a "sessions" array. ONE entry per session:
 {{"sessions": [
   {{
     "date": "2026-04-20",
@@ -185,6 +218,7 @@ Return a JSON object with a "sessions" array:
     "tool": "...",
     "category": "...",
     "task_desc": "...",
+    "all_prompts": "Prompt 1 full text\\n---\\nPrompt 2 full text\\n---\\n...",
     "prompt": "...",
     "result": "...",
     "quality": "4 ★ Good",
@@ -197,26 +231,30 @@ Return a JSON object with a "sessions" array:
   }}
 ]}}
 
-Return ALL tasks. Be realistic with hour estimates.
+Return ALL sessions. Be realistic with hour estimates.
 </output_format>"""
 
 
 def generate_journal_entries(prompts: list[dict], model: str,
                              profile: dict[str, str]) -> list[dict]:
-    """Send prompts to LLM and get structured journal entries back."""
+    """Group prompts by session, send each batch to LLM, get journal entries."""
     profile_info = dict(profile) if profile else {"note": "No profile provided"}
 
-    # Batch prompts (max 15 per call to avoid token limits)
-    all_entries: list[dict] = []
-    batch_size = 15
+    session_groups = group_prompts_by_session(prompts)
+    print(f"   Grouped into {len(session_groups)} session(s)")
 
-    for start in range(0, len(prompts), batch_size):
-        batch = prompts[start:start + batch_size]
-        print(f"  • Processing prompts {start + 1}–{start + len(batch)}...")
+    all_entries: list[dict] = []
+    # Process sessions in batches (max 5 sessions per LLM call)
+    batch_size = 5
+
+    for start in range(0, len(session_groups), batch_size):
+        batch = session_groups[start:start + batch_size]
+        session_names = [s["session"] for s in batch]
+        print(f"  • Processing session(s): {', '.join(session_names)}...")
 
         prompt = JOURNAL_PROMPT.format(
             profile_json=json.dumps(profile_info, ensure_ascii=False, indent=2),
-            prompts_json=json.dumps(batch, ensure_ascii=False, indent=2),
+            sessions_json=json.dumps(batch, ensure_ascii=False, indent=2),
         )
 
         try:
@@ -225,6 +263,17 @@ def generate_journal_entries(prompts: list[dict], model: str,
             parsed = json.loads(raw)
             sessions = parsed.get("sessions", []) if isinstance(parsed, dict) else parsed
             if isinstance(sessions, list):
+                # For each entry, if LLM didn't return all_prompts, build it
+                # from the source session data
+                for entry in sessions:
+                    if not entry.get("all_prompts"):
+                        # Find matching session group and build all_prompts
+                        entry_date = entry.get("date", "")
+                        for sg in batch:
+                            if sg["date"] == entry_date:
+                                texts = [p["text"] for p in sg["prompts"]]
+                                entry["all_prompts"] = "\n---\n".join(texts)
+                                break
                 all_entries.extend(sessions)
         except Exception as e:
             print(f"  ⚠  Batch failed: {e}", file=sys.stderr)
@@ -269,18 +318,28 @@ def write_journal(entries: list[dict], output: Path, staff: str) -> None:
         ws.cell(r, 4, value=entry.get("tool", ""))
         ws.cell(r, 5, value=entry.get("category", ""))
         ws.cell(r, 6, value=entry.get("task_desc", ""))
-        ws.cell(r, 7, value=entry.get("prompt", ""))
+        # Col 7: store ALL prompts from the session (full log);
+        # fall back to summarized prompt if all_prompts is empty
+        all_prompts = entry.get("all_prompts", "") or entry.get("prompt", "")
+        cell7 = ws.cell(r, 7, value=all_prompts)
+        cell7.alignment = Alignment(wrap_text=True, vertical="top")
         ws.cell(r, 8, value=entry.get("result", ""))
         ws.cell(r, 9, value=entry.get("quality", ""))
         ws.cell(r, 10, value=entry.get("rating"))
-        ws.cell(r, 11, value=entry.get("est_hours"))
-        ws.cell(r, 12, value=entry.get("actual_hours"))
-        ws.cell(r, 13, value=entry.get("time_saved"))
+        cell11 = ws.cell(r, 11, value=entry.get("est_hours"))
+        cell11.number_format = '0.0'
+        cell12 = ws.cell(r, 12, value=entry.get("actual_hours"))
+        cell12.number_format = '0.0'
+        cell13 = ws.cell(r, 13, value=entry.get("time_saved"))
+        cell13.number_format = '0.0'
         ws.cell(r, 14, value=entry.get("lesson", ""))
         ws.cell(r, 15, value=entry.get("tags", ""))
+        
+        print("Wrote entry:", entry.get("title", "Untitled"))
 
-        # Set row height for readability
-        ws.row_dimensions[r].height = 60
+        # Set row height — taller for multi-prompt cells
+        prompt_lines = all_prompts.count("\n") + 1
+        ws.row_dimensions[r].height = max(60, min(prompt_lines * 15, 400))
 
     # Save
     output.parent.mkdir(parents=True, exist_ok=True)
